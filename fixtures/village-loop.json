@@ -1,0 +1,356 @@
+{
+  "project": {
+    "name": "village-loop",
+    "timebase": {"kind": "music", "ppq": 480},
+    "head_revision": "r2",
+    "brief": {
+      "purpose": "A short loop for a quiet village",
+      "requirements": [
+        "Keep the melody clear",
+        "Loop playback"
+      ],
+      "assumptions": [
+        "4/4, eight bars, a two-bar introduction followed by a six-bar loop",
+        "Three voices: melody, accompaniment, and bass",
+        "Slightly faster for the last four bars"
+      ]
+    }
+  },
+  "revisions": [
+    {
+      "id": "r1",
+      "composition": {
+        "tempo_map": [
+          {"tick": 0, "microseconds_per_quarter": 500000},
+          {"tick": 3840, "microseconds_per_quarter": 500000},
+          {"tick": 7680, "microseconds_per_quarter": 400000}
+        ],
+        "time_signatures": [
+          {"tick": 0, "numerator": 4, "denominator": 4}
+        ],
+        "voices": [
+          {"id": "melody", "role": "melody"},
+          {"id": "accompaniment", "role": "accompaniment"},
+          {"id": "bass", "role": "bass"}
+        ],
+        "notes": [
+          {"id": "acc-1-1", "voice": "accompaniment", "start": 0, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-1-1", "voice": "bass", "start": 0, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "acc-1-2", "voice": "accompaniment", "start": 480, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "acc-1-3", "voice": "accompaniment", "start": 960, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-1-2", "voice": "bass", "start": 960, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "acc-1-4", "voice": "accompaniment", "start": 1440, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "acc-2-1", "voice": "accompaniment", "start": 1920, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-2-1", "voice": "bass", "start": 1920, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "acc-2-2", "voice": "accompaniment", "start": 2400, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-2-3", "voice": "accompaniment", "start": 2880, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-2-2", "voice": "bass", "start": 2880, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "acc-2-4", "voice": "accompaniment", "start": 3360, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-3-1", "voice": "accompaniment", "start": 3840, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-3-1", "voice": "bass", "start": 3840, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "mel-3-1", "voice": "melody", "start": 3840, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-3-2", "voice": "accompaniment", "start": 4320, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-3-2", "voice": "melody", "start": 4320, "duration": 480, "pitch": 79, "velocity": 96},
+          {"id": "acc-3-3", "voice": "accompaniment", "start": 4800, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-3-2", "voice": "bass", "start": 4800, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "mel-3-3", "voice": "melody", "start": 4800, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-3-4", "voice": "accompaniment", "start": 5280, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-3-4", "voice": "melody", "start": 5280, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-4-1", "voice": "accompaniment", "start": 5760, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-4-1", "voice": "bass", "start": 5760, "duration": 960, "pitch": 45, "velocity": 88},
+          {"id": "mel-4-1", "voice": "melody", "start": 5760, "duration": 960, "pitch": 69, "velocity": 96},
+          {"id": "acc-4-2", "voice": "accompaniment", "start": 6240, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "acc-4-3", "voice": "accompaniment", "start": 6720, "duration": 480, "pitch": 69, "velocity": 60},
+          {"id": "bass-4-2", "voice": "bass", "start": 6720, "duration": 960, "pitch": 52, "velocity": 80},
+          {"id": "mel-4-2", "voice": "melody", "start": 6720, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-4-4", "voice": "accompaniment", "start": 7200, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-4-3", "voice": "melody", "start": 7200, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-5-1", "voice": "accompaniment", "start": 7680, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-5-1", "voice": "bass", "start": 7680, "duration": 960, "pitch": 41, "velocity": 88},
+          {"id": "mel-5-1", "voice": "melody", "start": 7680, "duration": 720, "pitch": 77, "velocity": 96},
+          {"id": "acc-5-2", "voice": "accompaniment", "start": 8160, "duration": 480, "pitch": 65, "velocity": 60},
+          {"id": "mel-5-2", "voice": "melody", "start": 8400, "duration": 240, "pitch": 76, "velocity": 96},
+          {"id": "acc-5-3", "voice": "accompaniment", "start": 8640, "duration": 480, "pitch": 69, "velocity": 60},
+          {"id": "bass-5-2", "voice": "bass", "start": 8640, "duration": 960, "pitch": 48, "velocity": 80},
+          {"id": "mel-5-3", "voice": "melody", "start": 8640, "duration": 480, "pitch": 74, "velocity": 96},
+          {"id": "acc-5-4", "voice": "accompaniment", "start": 9120, "duration": 480, "pitch": 65, "velocity": 60},
+          {"id": "mel-5-4", "voice": "melody", "start": 9120, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-6-1", "voice": "accompaniment", "start": 9600, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-6-1", "voice": "bass", "start": 9600, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "mel-6-1", "voice": "melody", "start": 9600, "duration": 960, "pitch": 74, "velocity": 96},
+          {"id": "acc-6-2", "voice": "accompaniment", "start": 10080, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-6-3", "voice": "accompaniment", "start": 10560, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-6-2", "voice": "bass", "start": 10560, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "mel-6-2", "voice": "melody", "start": 10560, "duration": 480, "pitch": 71, "velocity": 96},
+          {"id": "acc-6-4", "voice": "accompaniment", "start": 11040, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "mel-6-3", "voice": "melody", "start": 11040, "duration": 480, "pitch": 67, "velocity": 96},
+          {"id": "acc-7-1", "voice": "accompaniment", "start": 11520, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-7-1", "voice": "bass", "start": 11520, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "mel-7-1", "voice": "melody", "start": 11520, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-7-2", "voice": "accompaniment", "start": 12000, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-7-2", "voice": "melody", "start": 12000, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-7-3", "voice": "accompaniment", "start": 12480, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-7-2", "voice": "bass", "start": 12480, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "mel-7-3", "voice": "melody", "start": 12480, "duration": 480, "pitch": 79, "velocity": 96},
+          {"id": "acc-7-4", "voice": "accompaniment", "start": 12960, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-7-4", "voice": "melody", "start": 12960, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-8-1", "voice": "accompaniment", "start": 13440, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-8-1", "voice": "bass", "start": 13440, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "mel-8-1", "voice": "melody", "start": 13440, "duration": 1440, "pitch": 74, "velocity": 96},
+          {"id": "acc-8-2", "voice": "accompaniment", "start": 13920, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-8-3", "voice": "accompaniment", "start": 14400, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-8-2", "voice": "bass", "start": 14400, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "acc-8-4", "voice": "accompaniment", "start": 14880, "duration": 480, "pitch": 62, "velocity": 60}
+        ],
+        "control_lanes": [
+          {
+            "voice": "melody",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 80}
+            ]
+          },
+          {
+            "voice": "accompaniment",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 81}
+            ]
+          },
+          {
+            "voice": "bass",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 38}
+            ]
+          }
+        ],
+        "sections": [
+          {"id": "intro", "start": 0, "end": 3840},
+          {"id": "theme-a", "start": 3840, "end": 9600},
+          {"id": "theme-b", "start": 9600, "end": 15360}
+        ],
+        "playback": {"end": 15360, "loop_start": 3840}
+      }
+    },
+    {
+      "id": "r2",
+      "parent": "r1",
+      "edit_request": {
+        "job_id": "smooth-bar4-accompaniment",
+        "base_revision": "r1",
+        "scope": {
+          "voices": [
+            "accompaniment"
+          ],
+          "range": {"start": 5760, "end": 7680}
+        },
+        "protections": [
+          {"voice": "melody"}
+        ],
+        "operations": [
+          {
+            "op": "update_notes",
+            "notes": [
+              {"id": "acc-4-1", "pitch": 57},
+              {"id": "acc-4-2", "pitch": 60},
+              {"id": "acc-4-3", "pitch": 64},
+              {"id": "acc-4-4", "pitch": 60}
+            ]
+          }
+        ],
+        "feedback": [
+          "jump-in-second-pass"
+        ],
+        "rationale": "Bar 4 accompaniment leaps up to A4 right under the melody; keep it below in A3-E4."
+      },
+      "composition": {
+        "tempo_map": [
+          {"tick": 0, "microseconds_per_quarter": 500000},
+          {"tick": 3840, "microseconds_per_quarter": 500000},
+          {"tick": 7680, "microseconds_per_quarter": 400000}
+        ],
+        "time_signatures": [
+          {"tick": 0, "numerator": 4, "denominator": 4}
+        ],
+        "voices": [
+          {"id": "melody", "role": "melody"},
+          {"id": "accompaniment", "role": "accompaniment"},
+          {"id": "bass", "role": "bass"}
+        ],
+        "notes": [
+          {"id": "acc-1-1", "voice": "accompaniment", "start": 0, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-1-1", "voice": "bass", "start": 0, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "acc-1-2", "voice": "accompaniment", "start": 480, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "acc-1-3", "voice": "accompaniment", "start": 960, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-1-2", "voice": "bass", "start": 960, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "acc-1-4", "voice": "accompaniment", "start": 1440, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "acc-2-1", "voice": "accompaniment", "start": 1920, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-2-1", "voice": "bass", "start": 1920, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "acc-2-2", "voice": "accompaniment", "start": 2400, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-2-3", "voice": "accompaniment", "start": 2880, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-2-2", "voice": "bass", "start": 2880, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "acc-2-4", "voice": "accompaniment", "start": 3360, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-3-1", "voice": "accompaniment", "start": 3840, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-3-1", "voice": "bass", "start": 3840, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "mel-3-1", "voice": "melody", "start": 3840, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-3-2", "voice": "accompaniment", "start": 4320, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-3-2", "voice": "melody", "start": 4320, "duration": 480, "pitch": 79, "velocity": 96},
+          {"id": "acc-3-3", "voice": "accompaniment", "start": 4800, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-3-2", "voice": "bass", "start": 4800, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "mel-3-3", "voice": "melody", "start": 4800, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-3-4", "voice": "accompaniment", "start": 5280, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-3-4", "voice": "melody", "start": 5280, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-4-1", "voice": "accompaniment", "start": 5760, "duration": 480, "pitch": 57, "velocity": 60},
+          {"id": "bass-4-1", "voice": "bass", "start": 5760, "duration": 960, "pitch": 45, "velocity": 88},
+          {"id": "mel-4-1", "voice": "melody", "start": 5760, "duration": 960, "pitch": 69, "velocity": 96},
+          {"id": "acc-4-2", "voice": "accompaniment", "start": 6240, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "acc-4-3", "voice": "accompaniment", "start": 6720, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "bass-4-2", "voice": "bass", "start": 6720, "duration": 960, "pitch": 52, "velocity": 80},
+          {"id": "mel-4-2", "voice": "melody", "start": 6720, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-4-4", "voice": "accompaniment", "start": 7200, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "mel-4-3", "voice": "melody", "start": 7200, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-5-1", "voice": "accompaniment", "start": 7680, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-5-1", "voice": "bass", "start": 7680, "duration": 960, "pitch": 41, "velocity": 88},
+          {"id": "mel-5-1", "voice": "melody", "start": 7680, "duration": 720, "pitch": 77, "velocity": 96},
+          {"id": "acc-5-2", "voice": "accompaniment", "start": 8160, "duration": 480, "pitch": 65, "velocity": 60},
+          {"id": "mel-5-2", "voice": "melody", "start": 8400, "duration": 240, "pitch": 76, "velocity": 96},
+          {"id": "acc-5-3", "voice": "accompaniment", "start": 8640, "duration": 480, "pitch": 69, "velocity": 60},
+          {"id": "bass-5-2", "voice": "bass", "start": 8640, "duration": 960, "pitch": 48, "velocity": 80},
+          {"id": "mel-5-3", "voice": "melody", "start": 8640, "duration": 480, "pitch": 74, "velocity": 96},
+          {"id": "acc-5-4", "voice": "accompaniment", "start": 9120, "duration": 480, "pitch": 65, "velocity": 60},
+          {"id": "mel-5-4", "voice": "melody", "start": 9120, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-6-1", "voice": "accompaniment", "start": 9600, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-6-1", "voice": "bass", "start": 9600, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "mel-6-1", "voice": "melody", "start": 9600, "duration": 960, "pitch": 74, "velocity": 96},
+          {"id": "acc-6-2", "voice": "accompaniment", "start": 10080, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-6-3", "voice": "accompaniment", "start": 10560, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-6-2", "voice": "bass", "start": 10560, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "mel-6-2", "voice": "melody", "start": 10560, "duration": 480, "pitch": 71, "velocity": 96},
+          {"id": "acc-6-4", "voice": "accompaniment", "start": 11040, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "mel-6-3", "voice": "melody", "start": 11040, "duration": 480, "pitch": 67, "velocity": 96},
+          {"id": "acc-7-1", "voice": "accompaniment", "start": 11520, "duration": 480, "pitch": 60, "velocity": 60},
+          {"id": "bass-7-1", "voice": "bass", "start": 11520, "duration": 960, "pitch": 48, "velocity": 88},
+          {"id": "mel-7-1", "voice": "melody", "start": 11520, "duration": 480, "pitch": 72, "velocity": 96},
+          {"id": "acc-7-2", "voice": "accompaniment", "start": 12000, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-7-2", "voice": "melody", "start": 12000, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-7-3", "voice": "accompaniment", "start": 12480, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-7-2", "voice": "bass", "start": 12480, "duration": 960, "pitch": 55, "velocity": 80},
+          {"id": "mel-7-3", "voice": "melody", "start": 12480, "duration": 480, "pitch": 79, "velocity": 96},
+          {"id": "acc-7-4", "voice": "accompaniment", "start": 12960, "duration": 480, "pitch": 64, "velocity": 60},
+          {"id": "mel-7-4", "voice": "melody", "start": 12960, "duration": 480, "pitch": 76, "velocity": 96},
+          {"id": "acc-8-1", "voice": "accompaniment", "start": 13440, "duration": 480, "pitch": 59, "velocity": 60},
+          {"id": "bass-8-1", "voice": "bass", "start": 13440, "duration": 960, "pitch": 43, "velocity": 88},
+          {"id": "mel-8-1", "voice": "melody", "start": 13440, "duration": 1440, "pitch": 74, "velocity": 96},
+          {"id": "acc-8-2", "voice": "accompaniment", "start": 13920, "duration": 480, "pitch": 62, "velocity": 60},
+          {"id": "acc-8-3", "voice": "accompaniment", "start": 14400, "duration": 480, "pitch": 67, "velocity": 60},
+          {"id": "bass-8-2", "voice": "bass", "start": 14400, "duration": 960, "pitch": 50, "velocity": 80},
+          {"id": "acc-8-4", "voice": "accompaniment", "start": 14880, "duration": 480, "pitch": 62, "velocity": 60}
+        ],
+        "control_lanes": [
+          {
+            "voice": "melody",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 80}
+            ]
+          },
+          {
+            "voice": "accompaniment",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 81}
+            ]
+          },
+          {
+            "voice": "bass",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 38}
+            ]
+          }
+        ],
+        "sections": [
+          {"id": "intro", "start": 0, "end": 3840},
+          {"id": "theme-a", "start": 3840, "end": 9600},
+          {"id": "theme-b", "start": 9600, "end": 15360}
+        ],
+        "playback": {"end": 15360, "loop_start": 3840}
+      }
+    }
+  ],
+  "renders": [
+    {
+      "id": "r1-loop2",
+      "revision": "r1",
+      "layout": {"kind": "full", "loop_passes": 2},
+      "sound_source": "reference-waveforms",
+      "sample_rate": 44100,
+      "length_samples": 1137780
+    },
+    {
+      "id": "r2-loop2",
+      "revision": "r2",
+      "layout": {"kind": "full", "loop_passes": 2},
+      "sound_source": "reference-waveforms",
+      "sample_rate": 44100,
+      "length_samples": 1137780
+    },
+    {
+      "id": "r2-bar4-accompaniment",
+      "revision": "r2",
+      "layout": {"kind": "excerpt", "start": 5760, "end": 7680},
+      "voices": [
+        "accompaniment"
+      ],
+      "sound_source": "reference-waveforms",
+      "sample_rate": 44100,
+      "length_samples": 110250
+    }
+  ],
+  "presentations": [
+    {
+      "id": "first-listen",
+      "title": "Village BGM · First draft",
+      "renders": [
+        {"render": "r1-loop2", "label": "First draft (two loop passes)"}
+      ]
+    },
+    {
+      "id": "after-smoothing",
+      "title": "Village BGM · Revised",
+      "renders": [
+        {"render": "r2-loop2", "label": "Revised (two loop passes)"},
+        {"render": "r1-loop2", "label": "Previous version"},
+        {"render": "r2-bar4-accompaniment", "label": "Revised passage, accompaniment only"}
+      ]
+    }
+  ],
+  "feedback": [
+    {
+      "id": "jump-in-second-pass",
+      "presentation": "first-listen",
+      "state": {"kind": "delivered", "sequence": 1},
+      "marks": [
+        {"render": "r1-loop2", "start_sample": 723240}
+      ],
+      "text": "The accompaniment jumps here — especially in the café scene"
+    },
+    {
+      "id": "after-smoothing-draft",
+      "presentation": "after-smoothing",
+      "state": {"kind": "draft"}
+    }
+  ],
+  "midi_exports": [
+    {
+      "id": "r2-midi",
+      "revision": "r2",
+      "assignments": [
+        {"voice": "melody", "track": "Melody", "channel": 0},
+        {"voice": "accompaniment", "track": "Accompaniment", "channel": 1},
+        {"voice": "bass", "track": "Bass", "channel": 2}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "project": {
+    "name": "pickup-chime",
+    "timebase": {"kind": "effect"},
+    "head_revision": "e1",
+    "brief": {
+      "purpose": "A short rising pickup chime",
+      "requirements": [
+        "About half a second"
+      ],
+      "assumptions": [
+        "Four rising notes, with a semitone bend on the final note"
+      ]
+    }
+  },
+  "revisions": [
+    {
+      "id": "e1",
+      "composition": {
+        "voices": [
+          {"id": "lead", "role": "effect"}
+        ],
+        "notes": [
+          {"id": "rise-1", "voice": "lead", "start": 0, "duration": 60000, "pitch": 72, "velocity": 100},
+          {"id": "rise-2", "voice": "lead", "start": 60000, "duration": 60000, "pitch": 76, "velocity": 100},
+          {"id": "rise-3", "voice": "lead", "start": 120000, "duration": 60000, "pitch": 79, "velocity": 104},
+          {"id": "peak", "voice": "lead", "start": 180000, "duration": 240000, "pitch": 84, "velocity": 110}
+        ],
+        "control_lanes": [
+          {
+            "voice": "lead",
+            "kind": "program",
+            "points": [
+              {"at": 0, "value": 80}
+            ]
+          },
+          {
+            "voice": "lead",
+            "kind": "pitch_bend_range",
+            "points": [
+              {"at": 0, "value": 2}
+            ]
+          },
+          {
+            "voice": "lead",
+            "kind": "pitch_bend",
+            "points": [
+              {"at": 0, "value": 0},
+              {"at": 240000, "value": 2048},
+              {"at": 300000, "value": 4096}
+            ]
+          },
+          {
+            "voice": "lead",
+            "kind": "expression",
+            "points": [
+              {"at": 0, "value": 110},
+              {"at": 330000, "value": 80},
+              {"at": 370000, "value": 50},
+              {"at": 400000, "value": 25}
+            ]
+          }
+        ],
+        "playback": {"end": 500000}
+      }
+    }
+  ],
+  "renders": [
+    {
+      "id": "e1-once",
+      "revision": "e1",
+      "layout": {"kind": "full", "loop_passes": 1},
+      "sound_source": "reference-waveforms",
+      "sample_rate": 44100,
+      "length_samples": 33075
+    }
+  ],
+  "presentations": [
+    {
+      "id": "first-listen",
+      "title": "Pickup chime · First draft",
+      "renders": [
+        {"render": "e1-once", "label": "First draft"}
+      ]
+    }
+  ],
+  "feedback": [
+    {
+      "id": "abrupt-ending",
+      "presentation": "first-listen",
+      "state": {"kind": "delivered", "sequence": 1},
+      "marks": [
+        {"render": "e1-once", "start_sample": 17640, "end_sample": 22050}
+      ],
+      "text": "The ending feels too abrupt"
+    }
+  ],
+  "midi_exports": [
+    {
+      "id": "e1-midi",
+      "revision": "e1",
+      "timing": {"ppq": 1000, "microseconds_per_quarter": 1000000},
+      "assignments": [
+        {"voice": "lead", "track": "Pickup", "channel": 0}
+      ]
+    }
+  ]
+}

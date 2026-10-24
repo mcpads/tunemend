@@ -1,0 +1,9 @@
+.DS_Store
+/out/
+/work/
+/target/
+/.playwright-mcp/
+/.tunemend/
+/.retro-midi/
+/.claude/
+__pycache__/

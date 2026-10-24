@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Listen and mark</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6a64; --line: #d9d6cc;
+  --accent: #2f5d8a; --accent-text: #ffffff; --mark: #c2410c; --range: rgba(194, 65, 12, 0.18);
+  --progress: rgba(47, 93, 138, 0.22); --ok: #2f7a3b; --bad: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161615; --panel: #22211f; --text: #ecebe6; --muted: #a3a29b; --line: #3a3935;
+    --accent: #7fb0e0; --accent-text: #10161c; --mark: #fb923c; --range: rgba(251, 146, 60, 0.22);
+    --progress: rgba(127, 176, 224, 0.22); --ok: #6fcf7c; --bad: #f87171; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 1.35rem; margin: 0 0 4px; }
+.note { color: var(--muted); font-size: 0.9rem; margin: 0 0 16px; }
+.banner { border: 1px solid var(--line); background: var(--panel); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; font-size: 0.9rem; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+.versions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+.transport { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); }
+#bar { position: relative; height: 44px; margin: 26px 0 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; touch-action: none; user-select: none; }
+#progress { position: absolute; inset: 0 auto 0 0; background: var(--progress); border-radius: 8px 0 0 8px; pointer-events: none; }
+#selection, .range-mark { position: absolute; top: 0; bottom: 0; background: var(--range); pointer-events: none; }
+#selection { border-left: 2px solid var(--mark); border-right: 2px solid var(--mark); }
+.point-mark { position: absolute; top: -4px; bottom: -4px; width: 3px; margin-left: -1px; background: var(--mark); pointer-events: none; }
+.tag { position: absolute; top: -20px; transform: translateX(-50%); font-size: 0.75rem; font-weight: 700; color: var(--mark); pointer-events: none; }
+.chip { display: inline-block; min-width: 1.6em; text-align: center; font-weight: 700; color: var(--accent-text); background: var(--mark); border-radius: 6px; padding: 0 6px; }
+#cursor { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+ul#marks { list-style: none; padding: 0; margin: 0 0 12px; }
+ul#marks li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--line); }
+ul#marks li .what { flex: 1 1 200px; }
+select, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+textarea { width: 100%; min-height: 64px; resize: vertical; }
+.footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+#saveState { color: var(--muted); font-size: 0.9rem; }
+#result { margin-top: 12px; font-weight: 600; }
+#result.ok { color: var(--ok); } #result.bad { color: var(--bad); }
+.empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Loading…</h1>
+  <p class="note">This preview uses a reference sound source. It may differ from the target console.</p>
+  <div id="older" class="banner" hidden>A newer version is available. Marks on this page will still refer to the version you hear here.</div>
+
+  <section class="panel">
+    <div class="versions" id="versions" aria-label="Version to hear"></div>
+    <div class="transport">
+      <button id="play" class="primary">▶ Play</button>
+      <span class="time"><span id="now">00:00.000</span> / <span id="total">00:00.000</span></span>
+    </div>
+    <div id="bar" aria-label="Playback position. Click to seek or drag to select a range.">
+      <div id="progress"></div><div id="selection" hidden></div><div id="cursor"></div>
+    </div>
+    <p id="otherMarks" class="note" hidden></p>
+    <div class="actions">
+      <button id="markNow">Mark this moment</button>
+      <button id="rangeToggle">Start range</button>
+      <button id="markRange" disabled>Mark selected range</button>
+      <button id="replay" disabled>Replay selected range</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2 style="font-size:1.05rem;margin:0 0 4px">Marks <span id="markCount"></span></h2>
+    <p class="note" style="margin:0 0 8px">Mark several places and send them together. During playback, use Start range and End range, or drag on the bar. Mark names (A, B…) stay the same when other marks are removed, so you can refer to them in comments, such as “B jumps out.”</p>
+    <ul id="marks"></ul>
+    <label for="text" class="note" style="display:block;margin:0 0 4px">Add a comment (optional) — for example, “The accompaniment jumps here.”</label>
+    <textarea id="text"></textarea>
+    <div class="footer">
+      <span id="saveState"></span>
+      <button id="deliver" class="primary">Send to AI</button>
+    </div>
+    <div id="result" role="status"></div>
+  </section>
+</main>
+<audio id="audio" preload="auto"></audio>
+<script>
+const parts = location.pathname.split('/').filter(Boolean);
+const project = decodeURIComponent(parts[1]), presentation = decodeURIComponent(parts[2]);
+const api = `/api/review/${encodeURIComponent(project)}/${encodeURIComponent(presentation)}`;
+const audio = document.getElementById('audio');
+let page = null, current = 0, marks = [], selection = null, stopAt = null, saveTimer = null, rangeStart = null;
+
+const fmt = (seconds) => {
+  const s = Math.max(0, seconds);
+  const m = Math.floor(s / 60);
+  return `${String(m).padStart(2, '0')}:${(s - m * 60).toFixed(3).padStart(6, '0')}`;
+};
+const item = () => page.items[current];
+const durationOf = (it) => it.length_samples / it.sample_rate;
+// Marks keep the name they were given; removing one never renames the others.
+const labelName = (n) => { let s = ''; n += 1; while (n > 0) { n -= 1; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); } return s; };
+const labelIndex = (label) => [...label].reduce((v, c) => v * 26 + (c.charCodeAt(0) - 64), 0) - 1;
+const nextLabel = () => labelName(marks.reduce((max, m) => Math.max(max, m.label ? labelIndex(m.label) : -1), -1) + 1);
+const addMark = (mark) => marks.push({ ...mark, label: nextLabel() });
+const toSample = (seconds, it) => Math.min(it.length_samples - 1, Math.max(0, Math.round(seconds * it.sample_rate)));
+
+function voiceName(voice) { return voice.role ? `${voice.role}` : voice.id; }
+
+function render() {
+  const it = item(), duration = durationOf(it);
+  document.getElementById('total').textContent = fmt(duration);
+  const bar = document.getElementById('bar');
+  bar.querySelectorAll('.point-mark,.range-mark,.tag').forEach((e) => e.remove());
+  for (const mark of marks.filter((m) => m.render === it.render)) {
+    const left = (mark.start_sample / it.length_samples) * 100;
+    if (mark.end_sample) {
+      const el = document.createElement('div');
+      el.className = 'range-mark';
+      el.style.left = `${left}%`;
+      el.style.width = `${((mark.end_sample - mark.start_sample) / it.length_samples) * 100}%`;
+      bar.appendChild(el);
+    } else {
+      const el = document.createElement('div');
+      el.className = 'point-mark';
+      el.style.left = `${left}%`;
+      bar.appendChild(el);
+    }
+    if (mark.label) {
+      const tag = document.createElement('div');
+      tag.className = 'tag';
+      tag.textContent = mark.label;
+      tag.style.left = `${left}%`;
+      bar.appendChild(tag);
+    }
+  }
+  // Marks belong to the exact file heard; another version may differ in timing,
+  // so they are listed but not drawn on this version's bar.
+  const elsewhere = marks.filter((m) => m.render !== it.render);
+  const other = document.getElementById('otherMarks');
+  other.hidden = elsewhere.length === 0;
+  other.textContent = elsewhere.length
+    ? `${elsewhere.length} marks belong to other versions (${elsewhere.map((m) => m.label).filter(Boolean).join(', ')}). Select a version or a mark below to view them. Each version has its own timing.`
+    : '';
+  const sel = document.getElementById('selection');
+  sel.hidden = !selection;
+  if (selection) {
+    sel.style.left = `${(selection[0] / duration) * 100}%`;
+    sel.style.width = `${((selection[1] - selection[0]) / duration) * 100}%`;
+  }
+  document.getElementById('markRange').disabled = !selection;
+  document.getElementById('replay').disabled = !selection;
+
+  const toggle = document.getElementById('rangeToggle');
+  toggle.textContent = rangeStart === null ? 'Start range' : `End range (from ${fmt(rangeStart)})`;
+  toggle.setAttribute('aria-pressed', String(rangeStart !== null));
+  document.getElementById('markCount').textContent = marks.length ? `(${marks.length})` : '';
+  const list = document.getElementById('marks');
+  list.innerHTML = '';
+  if (!marks.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'No marks yet.';
+    list.appendChild(li);
+  }
+  marks.forEach((mark, index) => {
+    const it2 = page.items.find((x) => x.render === mark.render);
+    const li = document.createElement('li');
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = mark.label || '';
+    const what = document.createElement('span');
+    what.className = 'what';
+    const at = fmt(mark.start_sample / it2.sample_rate);
+    what.textContent = mark.end_sample ? `${it2.label} · ${at} ~ ${fmt(mark.end_sample / it2.sample_rate)}` : `${it2.label} · around ${at}`;
+    what.style.cursor = 'pointer';
+    what.title = 'Go to this position';
+    what.onclick = () => { select(page.items.indexOf(it2), false); audio.currentTime = mark.start_sample / it2.sample_rate; };
+    const voice = document.createElement('select');
+    voice.setAttribute('aria-label', 'Voice (optional)');
+    voice.innerHTML = '<option value="">Not sure which voice</option>' +
+      it2.voices.map((v) => `<option value="${v.id}">${voiceName(v)}</option>`).join('');
+    voice.value = mark.voice || '';
+    voice.onchange = () => { mark.voice = voice.value || null; scheduleSave(); };
+    const remove = document.createElement('button');
+    remove.textContent = 'Remove mark';
+    remove.onclick = () => { marks.splice(index, 1); render(); scheduleSave(); };
+    li.append(chip, what, voice, remove);
+    list.appendChild(li);
+  });
+}
+
+function select(index, keepTime = true) {
+  const time = audio.currentTime || 0;
+  const wasPlaying = !audio.paused;
+  current = index;
+  selection = null;
+  rangeStart = null;
+  document.querySelectorAll('#versions button').forEach((b, i) => b.setAttribute('aria-pressed', String(i === index)));
+  audio.src = `/audio/${item().object}`;
+  audio.addEventListener('loadedmetadata', () => {
+    if (keepTime) audio.currentTime = Math.min(time, durationOf(item()));
+    if (wasPlaying) audio.play();
+  }, { once: true });
+  render();
+}
+
+function tick() {
+  if (page) {
+    const it = item();
+    const pct = Math.min(100, (audio.currentTime / durationOf(it)) * 100);
+    document.getElementById('progress').style.width = `${pct}%`;
+    document.getElementById('cursor').style.left = `${pct}%`;
+    document.getElementById('now').textContent = fmt(audio.currentTime);
+    if (stopAt !== null && audio.currentTime >= stopAt) { audio.pause(); stopAt = null; }
+  }
+  requestAnimationFrame(tick);
+}
+
+function scheduleSave() {
+  document.getElementById('saveState').textContent = 'Saving…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveDraft, 300);
+}
+
+async function saveDraft() {
+  try {
+    const response = await fetch(`${api}/draft`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ marks, text: document.getElementById('text').value || null }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    document.getElementById('saveState').textContent = 'Draft saved';
+    return true;
+  } catch (error) {
+    document.getElementById('saveState').textContent = 'Could not save draft — please try again';
+    return false;
+  }
+}
+
+async function load() {
+  const response = await fetch(api);
+  if (!response.ok) { document.getElementById('title').textContent = 'Could not open this page'; return; }
+  const data = await response.json();
+  page = data.page;
+  document.title = page.title || 'Listen and mark';
+  document.getElementById('title').textContent = page.title || 'Listen and mark';
+  document.getElementById('older').hidden = page.is_latest;
+  const versions = document.getElementById('versions');
+  page.items.forEach((it, i) => {
+    const button = document.createElement('button');
+    button.textContent = it.label;
+    button.onclick = () => select(i);
+    versions.appendChild(button);
+  });
+  if (page.items.length < 2) versions.hidden = true;
+  if (data.draft) { marks = data.draft.marks || []; document.getElementById('text').value = data.draft.text || ''; }
+  select(0, false);
+}
+
+const bar = document.getElementById('bar');
+let dragStart = null;
+const barTime = (event) => {
+  const rect = bar.getBoundingClientRect();
+  return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)) * durationOf(item());
+};
+bar.addEventListener('pointerdown', (e) => { dragStart = barTime(e); bar.setPointerCapture(e.pointerId); });
+bar.addEventListener('pointermove', (e) => {
+  if (dragStart === null) return;
+  const t = barTime(e);
+  if (Math.abs(t - dragStart) > durationOf(item()) * 0.005) { selection = [Math.min(t, dragStart), Math.max(t, dragStart)]; render(); }
+});
+bar.addEventListener('pointerup', (e) => {
+  const t = barTime(e);
+  if (selection && dragStart !== null && Math.abs(t - dragStart) > durationOf(item()) * 0.005) {
+    audio.currentTime = selection[0];
+  } else { selection = null; audio.currentTime = t; render(); }
+  dragStart = null;
+});
+
+document.getElementById('play').onclick = () => (audio.paused ? audio.play() : audio.pause());
+audio.addEventListener('play', () => { document.getElementById('play').textContent = '❚❚ Pause'; });
+audio.addEventListener('pause', () => { document.getElementById('play').textContent = '▶ Play'; });
+document.getElementById('markNow').onclick = () => {
+  addMark({ render: item().render, start_sample: toSample(audio.currentTime, item()), voice: null });
+  render(); scheduleSave();
+};
+document.getElementById('markRange').onclick = () => {
+  const it = item();
+  const start = toSample(selection[0], it), end = Math.max(start + 1, Math.min(it.length_samples, Math.round(selection[1] * it.sample_rate)));
+  addMark({ render: it.render, start_sample: start, end_sample: end, voice: null });
+  selection = null; render(); scheduleSave();
+};
+document.getElementById('rangeToggle').onclick = () => {
+  const it = item();
+  if (rangeStart === null) {
+    rangeStart = audio.currentTime;
+  } else {
+    const [from, to] = [Math.min(rangeStart, audio.currentTime), Math.max(rangeStart, audio.currentTime)];
+    const start = toSample(from, it);
+    const end = Math.max(start + 1, Math.min(it.length_samples, Math.round(to * it.sample_rate)));
+    addMark({ render: it.render, start_sample: start, end_sample: end, voice: null });
+    rangeStart = null;
+    scheduleSave();
+  }
+  render();
+};
+document.getElementById('replay').onclick = () => { audio.currentTime = selection[0]; stopAt = selection[1]; audio.play(); };
+document.getElementById('text').addEventListener('input', scheduleSave);
+document.getElementById('deliver').onclick = async () => {
+  const result = document.getElementById('result');
+  const button = document.getElementById('deliver');
+  button.disabled = true;
+  clearTimeout(saveTimer);
+  // randomUUID exists only in secure contexts; any unique text works as a retry key.
+  const deliveryId = window.crypto && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  try {
+    if (!(await saveDraft())) throw new Error('draft');
+    let response = null;
+    for (let attempt = 0; attempt < 3 && !response; attempt++) {
+      try { response = await fetch(`${api}/deliver`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ delivery_id: deliveryId }) }); }
+      catch (error) { if (attempt === 2) throw error; }
+    }
+    const body = await response.json();
+    if (!response.ok || body.status !== 'ok') throw new Error(body.summary || 'failed');
+    marks = []; document.getElementById('text').value = ''; render();
+    document.getElementById('saveState').textContent = '';
+    result.className = 'ok';
+    result.textContent = 'Sent. Return to the conversation and ask the AI to review your feedback.';
+  } catch (error) {
+    result.className = 'bad';
+    result.textContent = error.message === 'there is nothing to deliver yet'
+      ? 'Add a mark or comment before sending.'
+      : 'Could not send. Your marks are still here; please try again shortly.';
+  } finally { button.disabled = false; }
+};
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); document.getElementById('play').click(); }
+  if (e.key === 'm' || e.key === 'M') document.getElementById('markNow').click();
+  if (e.key === 'r' || e.key === 'R') document.getElementById('rangeToggle').click();
+});
+requestAnimationFrame(tick);
+load();
+</script>
+</body>
+</html>

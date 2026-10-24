@@ -1,0 +1,33 @@
+[package]
+name = "tunemend"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "MIDI composition and revision tools for AI agents, with listening and feedback"
+
+[dependencies]
+axum = "0.8"
+num-rational = { version = "0.4", default-features = false, features = ["std"] }
+midly = { version = "0.5.3", default-features = false, features = ["alloc", "std", "strict"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+# Stored records are content-addressed JSON; floats must re-serialize exactly.
+# Dev-dependencies enable this too, so tests alone cannot catch its absence.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+rmcp = { version = "3", default-features = false, features = ["server", "transport-io"] }
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "net", "sync", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[[bin]]
+name = "tunemend"
+path = "src/main.rs"
+
+[dev-dependencies]
+jsonschema = { version = "0.58", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"
