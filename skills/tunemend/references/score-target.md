@@ -87,3 +87,9 @@ Original source preservation, mapped score readback, driver audio, ROM insertion
 and in-game playback are separate results. The latter three are not established
 by this workflow. Python and encoder snapshots are retained privately in the
 workspace store for provenance; export does not redistribute external source.
+
+## Frame-converter handoff
+
+For `convert_for_target`, use the consumer's driver limits, patches and capability profile. Map every voice explicitly and check those constraints first. Never invent patches for an existing game.
+
+The frame adapter refuses source-backed MIDI and reported information loss before invoking the converter. When conversion succeeds, report its capability status and verification scope. Encoding and playback in the game remain consumer work; a generated file alone does not establish that it plays there.

@@ -22,7 +22,7 @@ Your agent handles the notes, instruments, mix and files. You can start from a d
 
 ## Listen, point, ask for a change
 
-Open the listening link your agent gives you. Mark a moment or a passage, add a comment if you want, and choose **Send to AI**.
+Open the listening link your agent gives you. Mark a moment or a passage, add a comment if you want, and choose **Send to AI**. Back in the conversation, ask your agent to review the marks.
 
 > The accompaniment gets in the way here.
 >
