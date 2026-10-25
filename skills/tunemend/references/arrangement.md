@@ -8,7 +8,7 @@ Load the original with `load_midi`, inspect its summary and events, then use `im
 
 Use protections on every edit that must preserve a part. A voice protection covers notes, controllers, clips, mixer state and instruments. A range narrows timed items, but the voice's strip, sends, effects and instrument remain protected as a whole.
 
-Source-backed edits retain track/channel identities, original markers, end/loop boundaries and RPN ranges. Unsupported audible events can block a preview without blocking original MIDI delivery. Do not discard those events to make a render succeed.
+Source-backed edits retain track/channel identities, original markers, end/loop boundaries and RPN ranges. Single-port declarations and channel prefixes are preserved; multiple receivers remain unsupported. Same-track tempo events at one tick retain their order, with the final value shown in the editor. External SMPTE offsets and terminal controls stay in the source rather than moving the local editable timeline. Unsupported audible events can block a preview without blocking original MIDI delivery. Do not discard those events to make a render succeed. Initial GM resets, channel pressure and CC20–31 SoundFont modulation can play in the reference model; custom game loop meanings are not inferred from those controllers.
 
 With no musical edit, verify `compare_midi` reports `byte_identical: true`. With edits, inspect intentional differences and the export's source-preservation/readback results. Retain the original in the bundle.
 

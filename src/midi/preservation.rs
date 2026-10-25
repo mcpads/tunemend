@@ -175,8 +175,12 @@ pub fn write_preserving(
     for (track_index, track) in smf.tracks.iter().enumerate() {
         let mut tick = 0u64;
         let mut last_control = BTreeMap::new();
+        let mut last_tempo = BTreeMap::new();
         for (index, event) in track.iter().enumerate() {
             tick += u64::from(event.delta.as_int());
+            if matches!(event.kind, TrackEventKind::Meta(MetaMessage::Tempo(_))) {
+                last_tempo.insert(tick, index);
+            }
             if let TrackEventKind::Midi { channel, message } = event.kind
                 && let Some((kind, _)) = direct_control(message)
             {
@@ -196,9 +200,11 @@ pub fn write_preserving(
                     let Some(point) = composition.tempo_map.iter().find(|p| p.tick == tick) else {
                         continue;
                     };
-                    kind = TrackEventKind::Meta(MetaMessage::Tempo(u24::new(
-                        point.microseconds_per_quarter,
-                    )));
+                    if last_tempo[&tick] == index {
+                        kind = TrackEventKind::Meta(MetaMessage::Tempo(u24::new(
+                            point.microseconds_per_quarter,
+                        )));
+                    }
                 }
                 TrackEventKind::Meta(MetaMessage::TimeSignature(_, _, clocks, thirty_seconds))
                     if meter_changed =>
@@ -285,7 +291,8 @@ pub fn write_preserving(
                         };
                     }
                     _ => {
-                        if let Some((control, _)) = direct_control(message)
+                        if tick < old.playback.end
+                            && let Some((control, _)) = direct_control(message)
                             && let Some(next) = changed_lanes.get(&(voice, control))
                         {
                             let point =

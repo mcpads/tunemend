@@ -3,6 +3,44 @@
 use super::*;
 use serde_json::{Value, json};
 
+/// The current project renderer has one MIDI receiver. A declared port is
+/// harmless when every routed event uses that same receiver, including a
+/// nonzero port number. Never merge events from distinct receivers.
+pub(super) fn routing_blockers(smf: &Smf<'_>) -> Vec<Diagnostic> {
+    let mut receiver = None;
+    let mut diagnostics = Vec::new();
+    for (track, events) in smf.tracks.iter().enumerate() {
+        let mut port = 0;
+        for (index, event) in events.iter().enumerate() {
+            match event.kind {
+                TrackEventKind::Meta(MetaMessage::MidiPort(value)) => port = value.as_int(),
+                TrackEventKind::Midi { .. }
+                | TrackEventKind::SysEx(_)
+                | TrackEventKind::Escape(_) => {
+                    if let Some(previous) = receiver {
+                        if port != previous {
+                            diagnostics.push(Diagnostic {
+                                code: Code::UnsupportedMidi,
+                                location: format!("/tracks/{track}/events/{index}"),
+                                message: format!("MIDI ports {previous} and {port} address different receivers; multi-port editing and rendering are not supported"),
+                            });
+                            return diagnostics;
+                        }
+                    } else {
+                        receiver = Some(port);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    diagnostics
+}
+
+fn gm_initialization(data: &[u8]) -> bool {
+    matches!(data, [0x7e, 0x7f, 0x09, 0x01 | 0x03, 0xf7])
+}
+
 /// Messages the reference synthesizer cannot interpret must never disappear
 /// silently from a preview. Metadata remains in the source but needs no sound.
 pub fn preview_blockers(bytes: &[u8]) -> Vec<Diagnostic> {
@@ -13,22 +51,47 @@ pub fn preview_blockers(bytes: &[u8]) -> Vec<Diagnostic> {
             message: "invalid Standard MIDI File".into(),
         }];
     };
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = routing_blockers(&smf);
+    // A fresh reference receiver already has its initial state. GM1/GM2
+    // initialization before any channel state needs no further sound action.
+    // Resets later in the song must not silently lose their state changes.
+    let first_channel = smf
+        .tracks
+        .iter()
+        .enumerate()
+        .filter_map(|(track, events)| {
+            let mut tick = 0u64;
+            events.iter().enumerate().find_map(|(index, event)| {
+                tick += u64::from(event.delta.as_int());
+                matches!(event.kind, TrackEventKind::Midi { .. }).then_some((tick, track, index))
+            })
+        })
+        .min();
     for (track, events) in smf.tracks.iter().enumerate() {
+        let mut tick = 0u64;
         for (index, event) in events.iter().enumerate() {
+            tick += u64::from(event.delta.as_int());
             let unsupported = match event.kind {
+                TrackEventKind::SysEx(data)
+                    if gm_initialization(data)
+                        && first_channel.is_none_or(|first| (tick, track, index) < first) =>
+                {
+                    false
+                }
                 TrackEventKind::SysEx(_) | TrackEventKind::Escape(_) => true,
                 TrackEventKind::Midi {
                     message: MidiMessage::Aftertouch { .. },
                     ..
                 } => true,
-                // Controllers the native reference synthesizer interprets.
+                // CC20..31 have no assigned GM sound function. They still
+                // reach the SoundFont's controller modulators; custom game
+                // meanings (such as loop cues) are not inferred.
                 TrackEventKind::Midi {
                     message: MidiMessage::Controller { controller, .. },
                     ..
                 } => !matches!(
                     controller.as_int(),
-                    0 | 1 | 6 | 7 | 10 | 11 | 38 | 64 | 66 | 91 | 93 | 98..=101 | 120 | 121 | 123..=127
+                    0 | 1 | 6 | 7 | 10 | 11 | 20..=31 | 38 | 64 | 66 | 91 | 93 | 98..=101 | 120 | 121 | 123..=127
                 ),
                 _ => false,
             };

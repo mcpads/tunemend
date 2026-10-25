@@ -552,6 +552,7 @@ fn send(synthesizer: &mut Synthesizer, channel: u8, message: ChannelMessage) {
         ChannelMessage::PitchBend(bend) => {
             synthesizer.pitch_bend(channel, (i32::from(bend) + 8192).clamp(0, 16383) as u16)
         }
+        ChannelMessage::ChannelPressure(value) => synthesizer.channel_pressure(channel, value),
     }
 }
 
@@ -861,6 +862,9 @@ pub fn render_midi_with_sources(
                 },
                 MidiMessage::ProgramChange { program } => ChannelMessage::Program(program.as_int()),
                 MidiMessage::PitchBend { bend } => ChannelMessage::PitchBend(bend.as_int()),
+                MidiMessage::ChannelAftertouch { vel } => {
+                    ChannelMessage::ChannelPressure(vel.as_int())
+                }
                 _ => unreachable!("preview blockers reject aftertouch"),
             };
             events.push((

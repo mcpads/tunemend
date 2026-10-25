@@ -717,3 +717,73 @@ fn programs_banks_and_percussion_select_presets() {
     s.program_change(9, 3);
     assert_eq!(s.channels[9].preset, Some(2), "bank 128 program 0 fallback");
 }
+
+#[test]
+fn source_midi_generic_controllers_reach_soundfont_modulators() {
+    use crate::{render::render_midi, review::RenderLayout};
+    use midly::num::{u4, u7, u15, u28};
+    use midly::{
+        Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind,
+    };
+    for controller in [20, 31] {
+        let mut spec = simple_font(&[]);
+        // A real CC -> attenuation modulator makes delivery to the synth observable.
+        spec.instruments[0][0]
+            .modulators
+            .push([0x80 | controller, 48, 480, 0, 0]);
+        let render = |value| {
+            let smf = Smf {
+                header: Header::new(Format::SingleTrack, Timing::Metrical(u15::new(480))),
+                tracks: vec![vec![
+                    TrackEvent {
+                        delta: u28::new(0),
+                        kind: TrackEventKind::Midi {
+                            channel: u4::new(0),
+                            message: MidiMessage::Controller {
+                                controller: u7::new(controller as u8),
+                                value: u7::new(value),
+                            },
+                        },
+                    },
+                    TrackEvent {
+                        delta: u28::new(0),
+                        kind: TrackEventKind::Midi {
+                            channel: u4::new(0),
+                            message: MidiMessage::NoteOn {
+                                key: u7::new(69),
+                                vel: u7::new(100),
+                            },
+                        },
+                    },
+                    TrackEvent {
+                        delta: u28::new(480),
+                        kind: TrackEventKind::Midi {
+                            channel: u4::new(0),
+                            message: MidiMessage::NoteOff {
+                                key: u7::new(69),
+                                vel: u7::new(64),
+                            },
+                        },
+                    },
+                    TrackEvent {
+                        delta: u28::new(0),
+                        kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+                    },
+                ]],
+            };
+            let mut bytes = Vec::new();
+            smf.write_std(&mut bytes).unwrap();
+            render_midi(
+                &bytes,
+                &RenderLayout::Full { loop_passes: 1 },
+                None,
+                &build(&spec),
+                44100,
+            )
+            .unwrap()
+        };
+        let loud = render(0);
+        let quiet = render(127);
+        assert!(rms(&quiet.left[2000..10000]) < rms(&loud.left[2000..10000]) * 0.02);
+    }
+}

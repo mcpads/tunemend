@@ -563,6 +563,9 @@ pub fn render_chip(
             ChannelMessage::PitchBend(_) => {
                 *not_applied.entry("pitch_bend".into()).or_default() += 1
             }
+            ChannelMessage::ChannelPressure(_) => {
+                *not_applied.entry("channel_pressure".into()).or_default() += 1
+            }
         }
     }
     if let Some(at) = release_at {

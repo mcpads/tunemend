@@ -23,6 +23,7 @@ pub enum ChannelMessage {
     Controller { controller: u8, value: u8 },
     Program(u8),
     PitchBend(i16),
+    ChannelPressure(u8),
 }
 
 impl ChannelMessage {
@@ -31,7 +32,10 @@ impl ChannelMessage {
     fn order_class(&self) -> u8 {
         match self {
             Self::NoteOff { .. } => 0,
-            Self::Controller { .. } | Self::Program(_) | Self::PitchBend(_) => 1,
+            Self::Controller { .. }
+            | Self::Program(_)
+            | Self::PitchBend(_)
+            | Self::ChannelPressure(_) => 1,
             Self::NoteOn { .. } => 2,
         }
     }

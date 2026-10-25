@@ -151,6 +151,9 @@ pub fn write_smf(
             ChannelMessage::PitchBend(bend) => MidiMessage::PitchBend {
                 bend: PitchBend::from_int(bend),
             },
+            ChannelMessage::ChannelPressure(value) => MidiMessage::ChannelAftertouch {
+                vel: u7::new(value),
+            },
         };
         voice_tracks[channel_track[&event.channel]].push((
             file_tick(event.at),

@@ -558,9 +558,10 @@ pub(super) fn full_capabilities() -> Value {
             },
             "midi_import": {
                 "accepted": ["SMF type 0 and 1 with PPQ timing", "note on/off and note-on velocity 0", "tempo, time and key signatures", "markers, text, cue points, lyrics, copyright, track names", "program change, CC1 modulation, CC7 volume, CC10 pan, CC11 expression, CC91 reverb, CC93 chorus", "pitch bend and RPN 0 bend range in whole semitones"],
-                "blocked": ["type 2 and SMPTE timing", "the same key restarting on a channel while it sounds", "unpaired or unreleased notes", "data entry outside whole-semitone RPN 0", "two different tempos or meters at one tick", "channel controls shared by several tracks", "port and channel prefix meta events"],
-                "retained_only": ["unmodeled controllers, aftertouch and SysEx (reference playback blocked)", "opaque metadata", "same-tick ordered controls (projection shows final value)"],
+                "blocked": ["type 2 and SMPTE timing", "the same key restarting on a channel while it sounds", "unpaired or unreleased notes", "data entry outside whole-semitone RPN 0", "conflicting tempos across tracks or meters at one tick", "channel controls shared by several tracks", "events routed to multiple MIDI ports"],
+                "retained_only": ["unmodeled control lanes, aftertouch and SysEx (preview support checked separately)", "single-port routing, channel prefix, external SMPTE synchronization offset and opaque metadata", "same-track same-tick controls and tempos (projection shows final value)", "terminal controls outside the editable timeline"],
                 "inspection": "analyze_midi reports source identity, editable and retained data, import blockers and preview limits without creating a project",
+                "preview": "single MIDI receiver; initial broadcast GM1/GM2 resets before channel setup, channel pressure and CC20..31 SoundFont modulators supported; custom game controller meanings and later SysEx resets are not inferred",
                 "preservation": "original bytes, unknown events and same-tick order survive import/export; compare_midi verifies results",
                 "assumed_and_reported": ["120 BPM when no tempo is at tick 0", "±2 semitone bend range before RPN 0"],
             },

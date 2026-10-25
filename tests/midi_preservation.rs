@@ -422,3 +422,213 @@ fn newly_composed_target_mapping_with_losses_does_not_run_converter() {
     drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn single_port_metadata_and_initial_gm_resets_preserve_edits_and_preview() {
+    use tunemend::{render::render_midi, review::RenderLayout, soundfont::reference_soundfont};
+    let base = source(false);
+    let mut smf = Smf::parse(&base).unwrap();
+    let prefix = [
+        TrackEventKind::Meta(MetaMessage::MidiPort(u7::new(9))),
+        TrackEventKind::Meta(MetaMessage::MidiChannel(u4::new(2))),
+        TrackEventKind::Meta(MetaMessage::SmpteOffset(
+            midly::SmpteTime::new(1, 2, 3, 4, 0, midly::Fps::Fps25).unwrap(),
+        )),
+        TrackEventKind::SysEx(b"\x7e\x7f\x09\x01\xf7"),
+        TrackEventKind::SysEx(b"\x7e\x7f\x09\x03\xf7"),
+    ];
+    smf.tracks[0].splice(
+        0..0,
+        prefix.into_iter().map(|kind| TrackEvent {
+            delta: u28::new(0),
+            kind,
+        }),
+    );
+    let mut bytes = Vec::new();
+    smf.write_std(&mut bytes).unwrap();
+    let mut imported = read_smf_preserving(&bytes).unwrap();
+    assert_eq!(
+        write_preserving(
+            &original(&bytes),
+            imported.timebase,
+            &imported.composition,
+            &plan(&bytes)
+        )
+        .unwrap(),
+        bytes
+    );
+    let layout = RenderLayout::Full { loop_passes: 1 };
+    let font = reference_soundfont();
+    let expected = render_midi(&base, &layout, None, &font, 16000).unwrap();
+    let actual = render_midi(&bytes, &layout, None, &font, 16000).unwrap();
+    assert_eq!(actual.left, expected.left);
+    assert_eq!(actual.right, expected.right);
+    imported.composition.notes[0].velocity = 73;
+    let edited = write_preserving(
+        &original(&bytes),
+        imported.timebase,
+        &imported.composition,
+        &plan(&bytes),
+    )
+    .unwrap();
+    assert_eq!(
+        events(&edited)[..prefix.len()],
+        events(&bytes)[..prefix.len()]
+    );
+    assert_eq!(
+        read_smf_preserving(&edited).unwrap().composition.notes[0].velocity,
+        73
+    );
+    // A second receiver may reuse the channel; it must not be merged into one.
+    let mut multi = Smf::parse(&bytes).unwrap();
+    let mut second = multi.tracks[0].clone();
+    second[0].kind = TrackEventKind::Meta(MetaMessage::MidiPort(u7::new(10)));
+    multi.header.format = Format::Parallel;
+    multi.tracks.push(second);
+    let mut conflicting = Vec::new();
+    multi.write_std(&mut conflicting).unwrap();
+    assert!(read_smf_preserving(&conflicting).is_err());
+    assert!(!tunemend::midi::preview_blockers(&conflicting).is_empty());
+}
+
+#[test]
+fn terminal_controls_survive_changes_to_the_same_editable_lane() {
+    let base = source(false);
+    let mut smf = Smf::parse(&base).unwrap();
+    let end = smf.tracks[0].last_mut().unwrap();
+    end.delta = u28::new(0);
+    let index = smf.tracks[0].len() - 1;
+    smf.tracks[0].insert(
+        index,
+        TrackEvent {
+            delta: u28::new(120),
+            kind: cc(7, 0),
+        },
+    );
+    smf.tracks[0].insert(
+        3,
+        TrackEvent {
+            delta: u28::new(0),
+            kind: cc(7, 100),
+        },
+    );
+    let mut bytes = Vec::new();
+    smf.write_std(&mut bytes).unwrap();
+    let mut imported = read_smf_preserving(&bytes).unwrap();
+    let lane = imported
+        .composition
+        .control_lanes
+        .iter_mut()
+        .find(|l| l.kind == ControlKind::Volume)
+        .unwrap();
+    assert_eq!(lane.points.len(), 1);
+    lane.points[0].value = 80;
+    let output = write_preserving(
+        &original(&bytes),
+        imported.timebase,
+        &imported.composition,
+        &plan(&bytes),
+    )
+    .unwrap();
+    assert!(events(&output).contains(&(240, cc(7, 0))));
+    assert!(events(&output).contains(&(0, cc(7, 80))));
+    assert_eq!(
+        read_smf_preserving(&output).unwrap().composition,
+        imported.composition
+    );
+}
+
+#[test]
+fn channel_pressure_renders_but_a_reset_after_channel_setup_still_refuses() {
+    use tunemend::{render::render_midi, review::RenderLayout, soundfont::reference_soundfont};
+    let base = source(false);
+    let mut smf = Smf::parse(&base).unwrap();
+    smf.tracks[0].insert(
+        7,
+        TrackEvent {
+            delta: u28::new(0),
+            kind: midi(MidiMessage::ChannelAftertouch { vel: u7::new(127) }),
+        },
+    );
+    let mut bytes = Vec::new();
+    smf.write_std(&mut bytes).unwrap();
+    assert!(tunemend::midi::preview_blockers(&bytes).is_empty());
+    let audio = render_midi(
+        &bytes,
+        &RenderLayout::Full { loop_passes: 1 },
+        None,
+        &reference_soundfont(),
+        16000,
+    )
+    .unwrap();
+    assert!(audio.left.iter().any(|v| v.abs() > 0.001));
+    smf.tracks[0].insert(
+        8,
+        TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::SysEx(b"\x7e\x7f\x09\x01\xf7"),
+        },
+    );
+    bytes.clear();
+    smf.write_std(&mut bytes).unwrap();
+    assert_eq!(tunemend::midi::preview_blockers(&bytes).len(), 1);
+    assert!(
+        render_midi(
+            &bytes,
+            &RenderLayout::Full { loop_passes: 1 },
+            None,
+            &reference_soundfont(),
+            16000
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ordered_tempos_within_a_track_keep_prior_events_when_the_final_value_changes() {
+    let base = source(false);
+    let mut smf = Smf::parse(&base).unwrap();
+    smf.tracks[0].insert(
+        3,
+        TrackEvent {
+            delta: u28::new(0),
+            kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(400_000))),
+        },
+    );
+    let mut bytes = Vec::new();
+    smf.write_std(&mut bytes).unwrap();
+    let mut imported = read_smf_preserving(&bytes).unwrap();
+    assert_eq!(
+        imported.composition.tempo_map[0].microseconds_per_quarter,
+        400_000
+    );
+    imported.composition.tempo_map[0].microseconds_per_quarter = 300_000;
+    let output = write_preserving(
+        &original(&bytes),
+        imported.timebase,
+        &imported.composition,
+        &plan(&bytes),
+    )
+    .unwrap();
+    let tempos: Vec<_> = events(&output)
+        .into_iter()
+        .filter_map(|(at, e)| match e {
+            TrackEventKind::Meta(MetaMessage::Tempo(t)) => Some((at, t.as_int())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tempos, vec![(0, 500_000), (0, 300_000)]);
+    assert_eq!(
+        read_smf_preserving(&output).unwrap().composition,
+        imported.composition
+    );
+    // Unlike same-track ordering, conflicting tracks do not state precedence.
+    smf.header.format = Format::Parallel;
+    smf.tracks.push(vec![TrackEvent {
+        delta: u28::new(0),
+        kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(600_000))),
+    }]);
+    bytes.clear();
+    smf.write_std(&mut bytes).unwrap();
+    assert!(read_smf_preserving(&bytes).is_err());
+}

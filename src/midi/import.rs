@@ -24,6 +24,7 @@ struct ReadNote {
 #[derive(Default)]
 struct ImportState {
     tempos: BTreeMap<u64, (u32, String)>,
+    tempo_tracks: BTreeMap<u64, usize>,
     time_signatures: BTreeMap<u64, (u8, u8, String)>,
     key_signatures: BTreeMap<u64, (i8, bool, String)>,
     markers: Vec<(u64, usize, Marker)>,
@@ -60,6 +61,9 @@ fn read(bytes: &[u8], preserve: bool) -> Result<ImportedMidi, Vec<Diagnostic>> {
             }]);
         }
     };
+    if preserve {
+        diagnostics.extend(super::inspection::routing_blockers(&smf));
+    }
     let mut report = Report::new("", &mut diagnostics);
     let ppq = match smf.header.timing {
         Timing::Metrical(ppq) if ppq.as_int() > 0 => ppq.as_int(),
@@ -197,6 +201,14 @@ fn read_event(
             MetaMessage::Tempo(tempo) => {
                 let tempo = tempo.as_int();
                 match state.tempos.get(&tick) {
+                    Some((existing, previous)) if *existing != tempo && state.preserve
+                        && state.tempo_tracks.get(&tick) == Some(&track) => {
+                        state.retained.push(Normalization {
+                            location: previous.clone(),
+                            message: format!("ordered tempos at tick {tick} retained in source; the editable projection uses the final value {tempo}"),
+                        });
+                        state.tempos.insert(tick, (tempo, location));
+                    }
                     Some((existing, _)) if *existing != tempo => report.push(
                         Code::UnsupportedMidi,
                         "",
@@ -204,6 +216,7 @@ fn read_event(
                     ),
                     Some(_) => normalizations.push(Normalization { location, message: "repeated tempo was merged".into() }),
                     None => {
+                        state.tempo_tracks.insert(tick, track);
                         state.tempos.insert(tick, (tempo, location));
                     }
                 }
@@ -295,11 +308,23 @@ fn read_event(
                 location,
                 message: "sequence number is not used by a type 0 or 1 file and was dropped".into(),
             }),
+            MetaMessage::MidiChannel(_) | MetaMessage::MidiPort(_) if state.preserve => {
+                state.retained.push(Normalization {
+                    location,
+                    message: "routing metadata retained unchanged; the projection uses the file's single output port".into(),
+                });
+            }
             MetaMessage::MidiChannel(_) | MetaMessage::MidiPort(_) => report.push(
                 Code::UnsupportedMidi,
                 "",
                 "channel prefix and port assignments are not supported",
             ),
+            MetaMessage::SmpteOffset(_) if state.preserve => {
+                state.retained.push(Normalization {
+                    location,
+                    message: "external SMPTE synchronization offset retained; the editable timeline starts at local tick zero".into(),
+                });
+            }
             MetaMessage::SmpteOffset(_) => {
                 report.push(Code::UnsupportedMidi, "", "SMPTE offsets are not supported")
             }
@@ -313,7 +338,7 @@ fn read_event(
             ),
         },
         TrackEventKind::SysEx(_) | TrackEventKind::Escape(_) if state.preserve => state.retained.push(Normalization {
-            location, message: "system exclusive data retained unchanged in source; reference preview cannot interpret it".into(),
+            location, message: "system exclusive data retained unchanged in source; preview support is checked separately".into(),
         }),
         TrackEventKind::SysEx(_) | TrackEventKind::Escape(_) => report.push(
             Code::UnsupportedMidi,
@@ -473,7 +498,7 @@ fn read_channel_message(
                     report.push(Code::UnsupportedMidi, "", "data entry for parameters other than RPN 0 is not supported")
                 }
                 other if state.preserve => state.retained.push(Normalization {
-                    location, message: format!("CC{other} is retained unchanged in source; reference preview cannot interpret it"),
+                    location, message: format!("CC{other} retained unchanged in source; not exposed as an editable control lane"),
                 }),
                 other => report.push(
                     Code::UnsupportedMidiController,
@@ -488,7 +513,7 @@ fn read_channel_message(
             state.retained.push(Normalization {
                 location,
                 message:
-                    "aftertouch retained unchanged in source; reference preview cannot interpret it"
+                    "aftertouch retained unchanged in source; not exposed as an editable control lane"
                         .into(),
             })
         }
@@ -501,7 +526,7 @@ fn read_channel_message(
 }
 
 fn build_composition(
-    state: ImportState,
+    mut state: ImportState,
     normalizations: &mut Vec<Normalization>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<(Composition, Vec<VoiceAssignment>)> {
@@ -542,6 +567,27 @@ fn build_composition(
     }
     if !diagnostics.is_empty() {
         return None;
+    }
+
+    // End-boundary controller cleanup affects the original render's release
+    // tail, but is outside the editable half-open timeline. Preserve it in SMF.
+    if state.preserve {
+        for points in state.lanes.values_mut() {
+            points.retain(|(point, location)| {
+                if point.at >= state.end {
+                    normalizations.push(Normalization {
+                        location: location.clone(),
+                        message:
+                            "terminal control retained in source outside the editable timeline"
+                                .into(),
+                    });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        state.lanes.retain(|_, points| !points.is_empty());
     }
 
     let mut tempo_map: Vec<TempoChange> = state
