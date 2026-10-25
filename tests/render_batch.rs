@@ -650,13 +650,13 @@ fn named_copies_give_delivered_mixes_and_stems_readable_names() {
         "export_project",
         json!({"job_id": "named", "project": "village", "destination": "out/named", "named_copies": true}),
     );
-    let listed: Vec<(String, String)> = named.result["named_copies"]["files"]
+    let listed: Vec<(std::path::PathBuf, String)> = named.result["named_copies"]["files"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| {
             (
-                f["path"].as_str().unwrap().to_owned(),
+                std::path::PathBuf::from(f["path"].as_str().unwrap()),
                 f["render"].as_str().unwrap().to_owned(),
             )
         })
@@ -673,9 +673,9 @@ fn named_copies_give_delivered_mixes_and_stems_readable_names() {
     ];
     let mut sorted = listed.clone();
     sorted.sort();
-    let mut wanted: Vec<(String, String)> = expected
+    let mut wanted: Vec<(std::path::PathBuf, String)> = expected
         .iter()
-        .map(|(p, r)| ((*p).to_owned(), (*r).to_owned()))
+        .map(|(p, r)| (std::path::PathBuf::from(p), (*r).to_owned()))
         .collect();
     wanted.sort();
     assert_eq!(sorted, wanted);
@@ -684,7 +684,8 @@ fn named_copies_give_delivered_mixes_and_stems_readable_names() {
         assert_eq!(
             std::fs::read(folder.join(path)).unwrap(),
             std::fs::read(folder.join(format!("renders/{render}.wav"))).unwrap(),
-            "{path}"
+            "{}",
+            path.display()
         );
     }
     let report: Value =
@@ -693,10 +694,16 @@ fn named_copies_give_delivered_mixes_and_stems_readable_names() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|f| f["path"] == "stems/full/voice-bass.wav")
+        .find(|f| {
+            std::path::Path::new(f["path"].as_str().unwrap())
+                == std::path::Path::new("stems/full/voice-bass.wav")
+        })
         .unwrap();
     assert_eq!(copy["kind"], "wav_named_copy");
-    assert_eq!(copy["copy_of"], "renders/render-7.wav");
+    assert_eq!(
+        std::path::Path::new(copy["copy_of"].as_str().unwrap()),
+        std::path::Path::new("renders/render-7.wav")
+    );
     assert_eq!(copy["part"], json!({"kind": "voice", "id": "bass"}));
     // Import reads only the bundle and renders/<id>.wav.
     let other = Workspace::new("named-import");
@@ -1048,7 +1055,10 @@ fn cut_tails_end_at_the_section_and_regenerate() {
         .filter(|f| f["kind"] == "wav")
         .collect();
     assert_eq!(wavs.len(), 1);
-    assert_eq!(wavs[0]["path"], format!("renders/{id}.wav"));
+    assert_eq!(
+        std::path::Path::new(wavs[0]["path"].as_str().unwrap()),
+        std::path::PathBuf::from(format!("renders/{id}.wav"))
+    );
     assert_eq!(wavs[0]["render"], id);
     assert_eq!(wavs[0]["region"], "intro");
     assert_eq!(wavs[0]["part"], listed[1]["render"]["part"]);

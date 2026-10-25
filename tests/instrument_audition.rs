@@ -139,7 +139,10 @@ fn plan_audition_reports_registers_replays_and_refuses_bad_requests() {
         stored
     );
     assert!(root.join("out/c5/audition.json").exists());
-    assert_eq!(played["result"]["exported"]["wav"], "out/c5/audition.wav");
+    assert_eq!(
+        std::path::Path::new(played["result"]["exported"]["wav"].as_str().unwrap()),
+        std::path::Path::new("out/c5/audition.wav")
+    );
     // audition.json holds the audition report; workspace paths stay in the response.
     let written: Value =
         serde_json::from_slice(&std::fs::read(root.join("out/c5/audition.json")).unwrap()).unwrap();

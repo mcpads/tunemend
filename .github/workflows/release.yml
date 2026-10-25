@@ -68,7 +68,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: cargo fmt --check
-      - run: cargo test --locked --target "$TARGET"
+      - run: cargo test --locked --no-fail-fast --target "$TARGET"
       - run: cargo clippy --locked --all-targets --target "$TARGET" -- -D warnings
       - run: cargo build --release --locked --target "$TARGET"
       - name: Package and probe the extracted executable

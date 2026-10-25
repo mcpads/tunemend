@@ -20,5 +20,5 @@ jobs:
         with:
           python-version: '3.x'
       - run: cargo fmt --check
-      - run: cargo test --locked
+      - run: cargo test --locked --no-fail-fast
       - run: cargo clippy --locked --all-targets -- -D warnings

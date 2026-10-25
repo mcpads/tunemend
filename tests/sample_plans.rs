@@ -758,7 +758,10 @@ fn sample_reports_come_with_a_reading_guide_and_exports_name_their_files() {
         json!({"job_id":"export","plan":prepared["plan"],"destination":"out/brr","accepted_changes":["sample_values"]}),
     );
     let written = exported["files"]["sample.bin"].as_str().unwrap();
-    assert!(written.ends_with("out/brr/sample.bin"), "{written}");
+    assert!(
+        std::path::Path::new(written).ends_with("out/brr/sample.bin"),
+        "{written}"
+    );
     assert!(std::path::Path::new(written).is_file());
     assert!(exported["files"]["report.json"].is_string());
     drop(s);
