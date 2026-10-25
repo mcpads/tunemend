@@ -136,7 +136,9 @@ async fn serve_review(workspace: PathBuf, port: u16) {
         serde_json::json!({"url": url, "pid": std::process::id()}).to_string(),
     )
     .unwrap_or_else(|e| fail(&e.to_string()));
-    eprintln!("review server at {url}; retry present_review for the listening link (Ctrl+C to stop)");
+    eprintln!(
+        "review server at {url}; retry present_review for the listening link (Ctrl+C to stop)"
+    );
     let _ = tokio::signal::ctrl_c().await;
     let _ = std::fs::remove_file(marker);
 }
