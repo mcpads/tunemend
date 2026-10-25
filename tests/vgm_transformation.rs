@@ -688,5 +688,6 @@ fn a_named_result_file_names_the_written_vgm_and_the_new_source() {
         .unwrap()
         .clone();
     assert_eq!(record["name"], "song-up2.vgm");
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }

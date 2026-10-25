@@ -213,6 +213,7 @@ fn single_snes_note_equals_render_instrument_exactly_and_after_resampling() {
         resampled.result["instruments"]["voices"][0]["conversion"]["method"],
         "kaiser_windowed_sinc"
     );
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -302,6 +303,7 @@ fn single_fm_note_equals_render_fm_patch_after_the_same_resampling() {
     let last = native.iter().rposition(|f| f != &[0, 0]).unwrap();
     let tail_ms = (last + 1 - 26634) as f64 * 144.0 / 7_670_454.0 * 1000.0;
     assert!(ms >= tail_ms, "{ms} {tail_ms}");
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -379,6 +381,7 @@ fn overlapping_notes_take_separate_chip_voices_up_to_the_declared_limit() {
         "{}",
         refused.summary
     );
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -432,6 +435,7 @@ fn loop_passes_and_excerpts_render_reproducibly_beside_reference_voices() {
     let first_notes = &excerpt.result["instruments"]["voices"][0]["chip_voices"]["first_notes"];
     assert_eq!(first_notes[0]["key"], 67);
     assert_eq!(first_notes[0]["seconds"], 0.0);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -602,6 +606,7 @@ fn assignments_check_references_scope_and_controls_and_leave_midi_unchanged() {
             "operations":[{"op":"clear_instrument","voice":"lead"}]}}),
     );
     assert_eq!(missing.status, Status::Blocked);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -686,6 +691,7 @@ fn source_backed_projects_play_instruments_without_changing_source_bytes() {
         .find(|a| a.kind == "midi")
         .unwrap();
     assert_eq!(std::fs::read(&midi.path).unwrap(), original);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -818,6 +824,7 @@ fn channel_controls_policy_applies_cc7_cc11_and_cc10_only_when_declared() {
     assert_eq!(renders[0], renders[1]);
     assert!(renders[2].iter().all(|f| f[1] == 0));
     assert!(renders[2].iter().any(|f| f[0].abs() > 1000));
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -950,5 +957,6 @@ fn check_project_counts_chip_instrument_releases_against_the_voice_budget() {
     assert_eq!(voices["first_notes"].as_array().unwrap().len(), 8);
     assert_eq!(voices["first_notes_listed"], "the first 8 of 10 notes");
     assert_eq!(voices["notes_per_chip_voice"][0], 10);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }

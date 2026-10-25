@@ -710,5 +710,6 @@ fn service_reports_effect_automation_everywhere_mixer_automation_appears() {
     assert!(
         strings(&capabilities.result["edit_operations"]).contains(&"set_effect_automation".into())
     );
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }

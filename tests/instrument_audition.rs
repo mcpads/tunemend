@@ -169,6 +169,7 @@ fn plan_audition_reports_registers_replays_and_refuses_bad_requests() {
             "{job}"
         );
     }
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -231,5 +232,6 @@ fn bank_slot_audition_uses_exact_brr_loop_and_declared_envelope_pair() {
             "{job}"
         );
     }
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }

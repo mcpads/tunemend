@@ -215,6 +215,7 @@ fn a_clip_lands_on_its_exact_sample_after_a_tempo_change_with_gain_fades_and_tri
     }
     assert_eq!(out[55125], [0, 0]);
     assert!(out[55125 + 1000..].iter().all(|f| f == &[0, 0]));
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -314,6 +315,7 @@ fn channel_modes_overlap_summing_and_resampling_are_explicit_and_deterministic()
         let expected = ((sum as f32).clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
         assert_eq!(out[k], [expected, expected], "summed sample {k}");
     }
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -424,6 +426,7 @@ fn loop_passes_replay_loop_clips_and_excerpts_crop_the_full_render() {
         excerpt.result["clips"]["played"][0]["placements"][0]["first_clip_sample"],
         11025
     );
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -691,6 +694,7 @@ fn clips_use_their_voice_strip_and_respect_scope_protections_and_sources() {
         codes(&missing),
         vec![("unknown_reference".into(), "/operations/0/id".into())]
     );
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -929,6 +933,7 @@ fn bundles_carry_clip_sources_and_instrument_data_into_a_fresh_workspace() {
     );
     assert!(reexport.artifacts.iter().any(|a| a.kind == "object"));
     let _ = second;
+    drop(f);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1007,6 +1012,7 @@ fn source_backed_projects_play_clips_without_changing_source_bytes() {
         .find(|a| a.kind == "midi")
         .unwrap();
     assert_eq!(std::fs::read(&midi.path).unwrap(), original);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1093,6 +1099,7 @@ fn bundles_carry_instrument_banks_for_bank_slot_voices() {
             .is_empty()
     );
     ok(&mut f, "inspect_instrument_bank", json!({"bank":id}));
+    drop((s, f));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1128,5 +1135,6 @@ fn a_span_rounded_up_to_whole_ticks_is_not_reported_as_exhausted() {
     assert_eq!(exhausted(&played[0]), false);
     assert_eq!(played[0]["placements"][0]["silent_samples"], 11);
     assert_eq!(exhausted(&played[1]), true);
+    drop(s);
     std::fs::remove_dir_all(root).unwrap();
 }
