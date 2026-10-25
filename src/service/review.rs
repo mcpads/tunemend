@@ -26,7 +26,7 @@ impl Service {
         response.summary = match &url {
             Some(url) => format!("{id} is ready at {url}"),
             None => format!(
-                "{id} is stored; start the listening screen with `tunemend review` to show it"
+                "{id} is stored; start `tunemend review` in this workspace, then retry this call for the listening link"
             ),
         };
         response.result["url"] = json!(url);

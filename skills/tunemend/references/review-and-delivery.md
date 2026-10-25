@@ -6,7 +6,7 @@ Read new marks with `read_feedback`, continuing from the last cursor. Inspect th
 
 Store conversational remarks verbatim with `record_feedback`. Attach the feedback ID and your hypothesis to the edit. Preserve the original scope and protections. Compare revisions to check what changed, and render the same layout before and after for an audio comparison.
 
-Present previous and revised candidates together when that helps the person judge the fix. Marks remain observations until the person confirms the result. After reconnecting, retry the original `present_review` request with the same job ID and arguments to recover a live URL.
+Present previous and revised candidates together when that helps the person judge the fix. Marks remain observations until the person confirms the result. After reconnecting, retry the original `present_review` request with the same job ID and arguments to recover a live URL. In CLI mode, a null URL means the review server is not running: start `tunemend review` in the same workspace, keep it alive, then retry that request for the listening link.
 
 ## Measure the question you are asking
 
