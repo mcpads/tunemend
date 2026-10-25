@@ -25,11 +25,18 @@ def require(condition, message):
 
 def notes_from_events(events):
     held, notes = {}, []
+    ports, receiver = {}, None
     for event in sorted(events, key=lambda e: (e['tick'], e['track'], e['index'])):
         m, tick = event['message'], event['tick']
         kind = m['kind']
-        require(kind not in ('port', 'channel_prefix'),
-                f"{event['id']}: port/channel-prefix routing needs a separate mapping")
+        if kind == 'port':
+            ports[event['track']] = m['port']
+        elif kind != 'channel_prefix' and ('channel' in m or kind in ('sysex', 'escape')):
+            port = ports.get(event['track'], 0)
+            if receiver is None:
+                receiver = port
+            require(port == receiver,
+                    f"{event['id']}: multiple MIDI output ports need a separate mapping")
         if kind not in ('note_on', 'note_off'):
             continue
         key = (m['channel'], m['key'])

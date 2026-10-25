@@ -231,3 +231,65 @@ fn intro_is_played_once_and_a_loop_back_to_the_intro_is_rejected() {
     assert!(bad.summary.contains("loop return"), "{bad:?}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn single_port_source_maps_without_discarding_routing_metadata_silently() {
+    let (root, mut service, request) = fixture("single-port");
+    let baseline = service.call("prepare_target", request.clone());
+    assert_eq!(baseline.status, Status::Ok, "{baseline:?}");
+    let original = std::fs::read(root.join("input.mid")).unwrap();
+    // Port 9 and channel prefix 7 do not change the channel 0 note messages.
+    let prefix = [0, 255, 33, 1, 9, 0, 255, 32, 1, 7];
+    let mut routed = original[..18].to_vec();
+    routed.extend(((original.len() - 22 + prefix.len()) as u32).to_be_bytes());
+    routed.extend(prefix);
+    routed.extend(&original[22..]);
+    std::fs::write(root.join("routed.mid"), &routed).unwrap();
+    let loaded = service.call(
+        "load_midi",
+        json!({"job_id":"routing-load", "path":"routed.mid"}),
+    );
+    assert_eq!(loaded.status, Status::Ok);
+    let mut mapped = request;
+    mapped["job_id"] = json!("routing-prepare");
+    mapped["source"] = loaded.result["source"].clone();
+    let result = service.call("prepare_target", mapped.clone());
+    assert_eq!(result.status, Status::Ok, "{result:?}");
+    assert_eq!(result.result["verification"]["source_events_accounted"], 10);
+    assert_eq!(result.result["changes"]["metadata_not_encoded"], 3);
+    for (name, prepared) in [("plain", baseline), ("routed", result)] {
+        let changes: Vec<_> = prepared.result["changes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        let exported = service.call("export_target", json!({"job_id":name, "plan":prepared.result["plan"], "accepted_changes":changes, "destination":format!("out/{name}")}));
+        assert_eq!(exported.status, Status::Ok, "{exported:?}");
+    }
+    assert_eq!(
+        std::fs::read(root.join("out/plain/score.bin")).unwrap(),
+        std::fs::read(root.join("out/routed/score.bin")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(root.join("out/routed/source.mid")).unwrap(),
+        routed
+    );
+    // The other receiver must not be merged just because note channels match.
+    let mut mixed = routed.clone();
+    let at = mixed.len() - 4;
+    mixed.splice(at..at, [0, 255, 33, 1, 10, 0, 0xb0, 7, 100]);
+    let track_size = (mixed.len() - 22) as u32;
+    mixed[18..22].copy_from_slice(&track_size.to_be_bytes());
+    std::fs::write(root.join("mixed.mid"), mixed).unwrap();
+    let loaded = service.call(
+        "load_midi",
+        json!({"job_id":"mixed-load", "path":"mixed.mid"}),
+    );
+    mapped["job_id"] = json!("mixed-prepare");
+    mapped["source"] = loaded.result["source"].clone();
+    let blocked = service.call("prepare_target", mapped);
+    assert_eq!(blocked.status, Status::Blocked);
+    assert!(blocked.summary.contains("multiple MIDI output ports"));
+    drop(service);
+    std::fs::remove_dir_all(root).unwrap();
+}

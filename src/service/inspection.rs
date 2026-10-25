@@ -795,7 +795,7 @@ pub(super) fn full_capabilities() -> Value {
             "target_conversion": {
                 "score_tools": ["prepare_target", "inspect_target", "export_target"],
                 "backend": "Compile score module API with external encoder, template and bank; Python 3 standard library",
-                "inputs": "loaded synchronous PPQ MIDI 0/1 or project revision; no editable projection required for sources",
+                "inputs": "loaded synchronous PPQ MIDI 0/1 using one output port, or project revision; no editable projection required for sources",
                 "mapping": "one to eight tracks, channels/chord rank, sample/envelope, drums, pan/volume, timing, loop, delayed copies; coincident onsets refuse unless same_tick=last is explicit",
                 "verification": "every source event accounted, encoded tracks independently decoded, headers/prefix/ARAM bounds checked, immutable input/tool/output hashes",
                 "selection": "export requires the exact plan and its explicit change kinds; original bytes remain separate and exact",

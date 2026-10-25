@@ -18,7 +18,8 @@ Python encoder plugin API. Only use a trusted local encoder.
 Supply either a loaded `source` ID or a `project` and optional `revision`.
 Source input does not require an editable composition. New projects can map
 without loading an external file. Source support here is synchronous PPQ SMF
-0/1, including RMID, with unambiguous note pairing. Type 2, SMPTE, port routing,
+0/1, including RMID, with unambiguous note pairing. Single-port declarations and channel prefixes are retained in the source and
+accounted as metadata not encoded by the driver. Type 2, SMPTE, multiple output ports,
 unpaired notes and overlapping same-key notes need a different mapping backend;
 these limitations never affect exact source loading.
 
