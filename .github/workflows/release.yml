@@ -1,0 +1,103 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Verify tag, version and main ancestry
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version)
+          assert os.environ['TAG'] == 'v' + version
+          PY
+          git merge-base --is-ancestor HEAD origin/main
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'A published version must not be replaced.' >&2
+            exit 1
+          fi
+  build:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-26
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - run: cargo fmt --check
+      - run: cargo test --locked --target "$TARGET"
+      - run: cargo clippy --locked --all-targets --target "$TARGET" -- -D warnings
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Package and probe the extracted executable
+        run: python scripts/package_release.py "$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+      - name: Publish archives and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          gh release create "$TAG" --verify-tag --latest --title "Tunemend ${TAG#v}" \
+            --notes 'Native MCP server and production skill for macOS 26+ Apple Silicon, Linux x64 (glibc 2.35+), and Windows x64. Give your agent https://github.com/mcpads/tunemend and ask it to follow skills/tunemend/references/install.md. SHA256SUMS covers all archives. Binaries are unsigned; tests and MCP probes do not establish musical quality or hardware fidelity.' \
+            -- ./*.tar.gz ./*.zip SHA256SUMS

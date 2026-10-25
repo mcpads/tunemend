@@ -1,40 +1,42 @@
-# Installing Tunemend
+# Install Tunemend for the user
 
-Handle setup and verification yourself. Ask the person only for access or information you cannot obtain. Preserve existing MCP entries and saved work.
+Handle download, setup and verification yourself. Ask the person only for access or information you cannot obtain. Preserve existing MCP entries and saved work.
 
-1. Inspect the host, MCP client and any existing Tunemend installation. Get the source from `https://github.com/mcpads/tunemend` and record the checked-out commit. This initial publication has no prebuilt release binaries. Install Rust and the host C build tools if missing (Xcode Command Line Tools on macOS, for bundled SQLite). Current installation evidence covers macOS; verify other hosts locally before claiming support.
-2. From the source checkout or extracted archive, build and install the binary into a directory on `PATH`, for example:
+## Select and install
 
-   ```sh
-   scripts/install.sh "$HOME/.local"
-   ```
+1. Inspect the host OS, CPU, MCP client and any existing installation. Read the latest published release at `https://api.github.com/repos/mcpads/tunemend/releases/latest` (or `gh release view --repo mcpads/tunemend`). Pin its tag and asset URLs for this installation.
+2. Download the matching archive and `SHA256SUMS` from that release. Verify its SHA-256 before extracting or running it. Do not use a draft or substitute development source without authorization.
 
-   This runs `cargo install --locked --path . --root <prefix>` and copies this skill to `<prefix>/share/tunemend/skills/`.
-3. Register one stdio server named `tunemend` using the installed executable's absolute path and arguments `["mcp"]`. Reuse an existing entry. For user-wide registration:
+| Host | Archive |
+| --- | --- |
+| macOS 26+, Apple Silicon | `tunemend-aarch64-apple-darwin.tar.gz` |
+| Linux x64, glibc 2.35+ | `tunemend-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x64 | `tunemend-x86_64-pc-windows-msvc.zip` |
 
-   ```sh
-   codex mcp add tunemend -- <absolute-prefix>/bin/tunemend mcp
-   claude mcp add --scope user tunemend -- <absolute-prefix>/bin/tunemend mcp
-   ```
+3. Extract into a temporary directory. Place `tunemend` (`tunemend.exe` on Windows) in a persistent user-writable application directory, preserving executable permissions. Keep the prior executable until the replacement connects; do not overwrite a running Windows executable. Archives also contain the production skill, README and license.
+4. Run the installed binary with `--version`; it must match the release tag without `v`. Binaries are unsigned. Do not disable OS security controls; if launch is blocked, report the required approval or use an authorized source build.
 
-   Use the command for the person's client; register both only when requested. Keep user-wide entries free of a fixed workspace: the server stores work in its launch directory. For a specific project, `--workspace <directory>` selects its storage explicitly.
-4. Copy the installed `<prefix>/share/tunemend/skills/tunemend/` directory, including `references/`, into the client's skill folder (`~/.codex/skills/` or `~/.claude/skills/`).
-5. Check the installed binary with `--version`. Reconnect the client, verify tool discovery, then call `get_capabilities` and `inspect_project` with `view: "projects"` through that client. A successful build or connection status alone is not a successful tool call. If reconnection needs a new session, report that remaining step.
+## Connect and verify
 
-Keep the MCP connection open during listening. After reconnecting, an identical `present_review` retry returns the existing presentation's live URL. Report the installed commit, verified client and next action briefly.
+Register one MCP stdio server named `tunemend`, with the installed executable's absolute path and arguments `["mcp"]`. Reuse an existing entry. For user-wide registration:
 
-New work is stored in `.tunemend/`. An existing `.retro-midi/` store is reused when `.tunemend/` is absent; the directories are not merged. Do not remove saved work when replacing an installation.
+```sh
+codex mcp add tunemend -- <absolute-path-to-tunemend> mcp
+claude mcp add --scope user tunemend -- <absolute-path-to-tunemend> mcp
+```
 
-The reference sound source is generated inside the binary; nothing else needs downloading. No DAW is needed.
+Use the command for the person's client; register both only when requested. Keep user-wide entries free of a fixed workspace: work belongs to the launch directory. A project-specific `--workspace <directory>` selects storage explicitly. Merge configuration without removing other servers.
 
-## Optional score backend
+Copy the archive's complete `skills/tunemend/` directory into the client's skill folder (`~/.codex/skills/` or `~/.claude/skills/`). Reconnect the client, verify tool discovery, then call `get_capabilities` and `inspect_project` with `view: "projects"` through it. A version check or connection status alone is not a successful tool call. If reconnection needs a new session, report that remaining step.
 
-The Compile score workflow additionally needs Python 3 (standard library only)
-and consumer-supplied encoder/template/bank inputs. They are not needed for
-ordinary MIDI creation, source loading, reference preview or feedback. See the
-[score reference](score-target.md) before choosing a backend.
+Keep the MCP connection open during listening. After reconnecting, retry the original `present_review` call to recover the same presentation's live URL. Report the installed version, verified client and next action briefly.
 
-## Sample conversion
+Saved work lives in `.tunemend/`. An existing `.retro-midi/` store is reused if `.tunemend/` is absent; stores are never merged. Do not remove saved work when replacing an installation.
 
-Sample conversion is built in; no external codec or Python is needed. See the
-[sample reference](sample-conversion.md).
+## Source builds
+
+For an authorized source build, check out the selected tag from `https://github.com/mcpads/tunemend`. Install stable Rust and the host C build tools for bundled SQLite (Xcode Command Line Tools on macOS, MSVC on Windows, distribution build tools on Linux).
+
+On Unix, `scripts/install.sh <prefix>` builds the binary and installs the complete skill under `<prefix>/share/tunemend/skills/`. Alternatively, run `cargo build --release --locked`, install `target/release/tunemend` (`tunemend.exe` on Windows), and copy `skills/tunemend/`. Verify the installed binary and client as above. Other architectures require their own build and checks.
+
+The reference sound source and sample codecs are built in. No DAW or extra sound download is required. The optional Compile score backend needs Python 3 and consumer-supplied encoder/template/bank inputs; see the [score reference](score-target.md).

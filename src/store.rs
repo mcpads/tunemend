@@ -156,7 +156,11 @@ impl Store {
                 .join("objects")
                 .join(format!("{hash}.partial-{}", std::process::id()));
             std::fs::write(&temporary, bytes)?;
-            std::fs::File::open(&temporary)?.sync_all()?;
+            // Windows FlushFileBuffers requires a handle opened for writing.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temporary)?
+                .sync_all()?;
             std::fs::rename(&temporary, &path)?;
         }
         Ok(hash)
