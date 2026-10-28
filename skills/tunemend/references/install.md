@@ -4,10 +4,10 @@ Handle download, setup and verification yourself. Ask the person only for access
 
 ## Select a build
 
-No binary release is currently available. For an authorized development checkout,
-use [source builds](#source-builds) and record its commit. A 404 or empty release
-list means there is no installable release; do not invent a tag, use withdrawn
-assets or silently substitute development source.
+Use the latest published release and verify its assets below. For an authorized
+development checkout, use [source builds](#source-builds) and record its commit.
+A 404 or empty release list means there is no installable release; do not invent
+a tag, use withdrawn assets or silently substitute development source.
 
 ## Published binaries
 
