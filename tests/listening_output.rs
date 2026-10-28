@@ -248,6 +248,7 @@ fn source_gain_gives_headroom_without_changing_requests_that_omit_it() {
         serde_json::to_value(serde_json::from_value::<RenderPreviewInput>(request).unwrap())
             .unwrap();
     assert!(canonical.get("gain_db").is_none());
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(fresh).unwrap();
 }
@@ -284,6 +285,7 @@ fn spoken_times_beyond_a_render_are_refused_with_its_length() {
         message.contains(&format!("{:.3} s", length as f64 / 16000.0)),
         "{message}"
     );
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -394,7 +396,9 @@ fn a_resumed_project_keeps_its_original_as_a_loaded_source() {
             .len(),
         1
     );
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
+    drop(resumed);
     std::fs::remove_dir_all(fresh).unwrap();
 }
 
@@ -442,6 +446,7 @@ fn a_source_without_timed_content_says_so_when_loaded() {
     );
     assert_eq!(timed["timed_content"], true);
     assert!(timed.get("timed_content_note").is_none());
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -541,6 +546,7 @@ fn a_lead_in_delays_a_source_render_and_marks_still_find_source_ticks() {
         json!({"job_id":"import","path":"delivery/loud.project.json","missing_renders":"regenerate"}),
     );
     assert_eq!(imported.status, Status::Ok, "{imported:?}");
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(fresh).unwrap();
 }
@@ -628,6 +634,7 @@ fn a_cut_tail_is_part_of_the_delivery_name() {
         .map(|f| f["path"].as_str().unwrap().replace('\\', "/"))
         .collect();
     assert_eq!(paths, vec!["mix/full-tail-cut.wav"]);
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -703,5 +710,6 @@ fn colliding_delivery_names_say_revision_and_role() {
             ),
         ]
     );
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }

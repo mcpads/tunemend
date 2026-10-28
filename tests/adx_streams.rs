@@ -182,7 +182,10 @@ fn renders_keep_the_loop_and_check_reentry() {
         json!({"job_id": "stream", "source": id, "destination": "out/stream"}),
     );
     let audio = &stream.result["measure_with"]["audio"];
-    assert_eq!(audio["path"], "out/stream/decoded.wav");
+    assert_eq!(
+        std::path::Path::new(audio["path"].as_str().unwrap()),
+        std::path::Path::new("out/stream").join("decoded.wav")
+    );
     assert_eq!(audio["expected_sha256"], stream.result["wav"]["sha256"]);
     ok(
         &mut service,

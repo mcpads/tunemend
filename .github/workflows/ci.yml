@@ -9,16 +9,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-26
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
       - run: cargo fmt --check
       - run: cargo test --locked --no-fail-fast
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Check packaged CLI and MCP workflows
+        run: python scripts/package_release.py ${{ matrix.target }}

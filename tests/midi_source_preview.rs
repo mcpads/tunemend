@@ -157,6 +157,7 @@ fn overlapping_shared_channel_events_play_from_the_source_stream() {
     assert_eq!(refused.status, Status::Blocked);
     assert_eq!(refused.diagnostics[0].location, "/tracks/0/events/0");
     assert!(!root.join("refused").exists());
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
 

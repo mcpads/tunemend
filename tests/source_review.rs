@@ -349,6 +349,7 @@ fn source_renders_are_reviewed_delivered_and_resumed_without_a_revision() {
                 json!({"job_id":"p","source":source,"renders":[{"render":"source-render-1","label":"Whole"}]}),
             );
         }
+        drop(service);
         std::fs::remove_dir_all(fresh).unwrap();
     }
 
@@ -378,6 +379,8 @@ fn source_renders_are_reviewed_delivered_and_resumed_without_a_revision() {
         serde_json::to_value(serde_json::from_value::<RenderPreviewInput>(request).unwrap())
             .unwrap();
     assert!(canonical.get("keep_for_review").is_none());
+    drop(service);
+    drop(resumed);
     for dir in [root, fresh, fresh_tampered] {
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -447,6 +450,7 @@ fn the_listening_screen_serves_and_delivers_a_source_presentation() {
     assert_eq!(read["feedback"][0]["text"], "too dry");
     assert_eq!(read["feedback"][0]["marks"][0]["start"]["source_tick"], 480);
     drop(runtime);
+    drop(shared);
     std::fs::remove_dir_all(root).unwrap();
 }
 

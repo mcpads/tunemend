@@ -239,6 +239,7 @@ fn the_same_channel_on_different_ports_plays_on_independent_receivers() {
             tunemend::review::WavFormat::Float32
         )
     );
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -357,6 +358,7 @@ fn a_selected_type_2_sequence_plays_alone_on_its_own_clock() {
     );
     assert_eq!(refused.status, Status::Blocked);
     assert_eq!(refused.diagnostics[0].location, "/sequence");
+    drop(service);
     std::fs::remove_dir_all(root).unwrap();
 
     // Requests without a sequence keep their canonical form and job hash.
