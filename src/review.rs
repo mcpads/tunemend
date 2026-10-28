@@ -3,6 +3,39 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// A source-only render kept for listening. It belongs to one retained MIDI
+/// source and its playback settings, never to a project, revision or voice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRender {
+    /// `source-render-N`, numbered per source.
+    pub id: String,
+    /// SHA-256 of the retained MIDI source.
+    pub source: String,
+    /// The SMF type 2 sequence (track index) that played.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u32>,
+    pub layout: RenderLayout,
+    pub sound_source: String,
+    pub sample_rate: u32,
+    /// Samples of the selected range; the rest is the decay tail.
+    pub content_samples: u64,
+    pub length_samples: u64,
+    pub tail_truncated: bool,
+    pub format: WavFormat,
+    /// MIDI ports of the receivers that played, ascending.
+    pub ports: Vec<u8>,
+    /// Output gain applied to the rendered samples; omitted means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<crate::mix::Tenths>,
+    /// Silent samples before the rendered content, included in
+    /// `length_samples`; omitted means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_in_samples: Option<u64>,
+    /// SHA-256 of the WAV file.
+    pub sha256: String,
+}
+
 /// A rendered PCM file of one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -103,6 +103,8 @@ fn original(bytes: &[u8]) -> MidiSource {
     MidiSource {
         sha256: tunemend::store::sha256_hex(bytes),
         bytes: bytes.to_vec(),
+        declared_ends: None,
+        legacy_declared_ends: None,
     }
 }
 fn plan(bytes: &[u8]) -> MidiExport {
@@ -487,8 +489,16 @@ fn single_port_metadata_and_initial_gm_resets_preserve_edits_and_preview() {
     multi.tracks.push(second);
     let mut conflicting = Vec::new();
     multi.write_std(&mut conflicting).unwrap();
-    assert!(read_smf_preserving(&conflicting).is_err());
-    assert!(!tunemend::midi::preview_blockers(&conflicting).is_empty());
+    let imported = read_smf_preserving(&conflicting).unwrap();
+    assert_eq!(
+        imported
+            .assignments
+            .iter()
+            .map(|a| a.port)
+            .collect::<Vec<_>>(),
+        vec![Some(9), Some(10)]
+    );
+    assert!(tunemend::midi::preview_blockers(&conflicting).is_empty());
 }
 
 #[test]
@@ -532,6 +542,58 @@ fn terminal_controls_survive_changes_to_the_same_editable_lane() {
     .unwrap();
     assert!(events(&output).contains(&(240, cc(7, 0))));
     assert!(events(&output).contains(&(0, cc(7, 80))));
+    assert_eq!(
+        read_smf_preserving(&output).unwrap().composition,
+        imported.composition
+    );
+}
+
+#[test]
+fn terminal_tempo_survives_tempo_edits_without_extending_the_song() {
+    let base = source(false);
+    let mut smf = Smf::parse(&base).unwrap();
+    let end = smf.tracks[0].last_mut().unwrap();
+    let delta = end.delta;
+    end.delta = u28::new(0);
+    let index = smf.tracks[0].len() - 1;
+    smf.tracks[0].insert(
+        index,
+        TrackEvent {
+            delta,
+            kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::new(666_666))),
+        },
+    );
+    let mut bytes = Vec::new();
+    smf.write_std(&mut bytes).unwrap();
+    let mut imported = read_smf_preserving(&bytes).unwrap();
+    assert_eq!(imported.composition.playback.end, 240);
+    assert_eq!(imported.composition.tempo_map.len(), 1);
+    assert_eq!(
+        write_preserving(
+            &original(&bytes),
+            imported.timebase,
+            &imported.composition,
+            &plan(&bytes)
+        )
+        .unwrap(),
+        bytes
+    );
+    imported.composition.tempo_map[0].microseconds_per_quarter = 300_000;
+    let output = write_preserving(
+        &original(&bytes),
+        imported.timebase,
+        &imported.composition,
+        &plan(&bytes),
+    )
+    .unwrap();
+    assert!(events(&output).contains(&(
+        240,
+        TrackEventKind::Meta(MetaMessage::Tempo(u24::new(666_666)))
+    )));
+    assert!(events(&output).contains(&(
+        0,
+        TrackEventKind::Meta(MetaMessage::Tempo(u24::new(300_000)))
+    )));
     assert_eq!(
         read_smf_preserving(&output).unwrap().composition,
         imported.composition

@@ -189,6 +189,18 @@ fn a_clip_lands_on_its_exact_sample_after_a_tempo_change_with_gain_fades_and_tri
         json!([{"voice":"fx","kind":"audio_clip","source":id,"clip":"c1"}])
     );
 
+    // Batch output must retain the same clip provenance/normalization as preview.
+    let batch = ok(
+        &mut s,
+        "render_batch",
+        json!({"job_id":"clip-report", "project":"p", "format":"float32"}),
+    );
+    assert_eq!(
+        batch.result["spans"][0]["clips"],
+        first.result["clips"]["played"]
+    );
+    assert!(batch.result["spans"][0]["clips"][0]["source_normalization"].is_object());
+
     // Gain -6.0 dB, 1 ms fades (45 samples at 44.1 kHz) and a trim of frames 100..1100.
     let shaped = edit(
         &mut s,
@@ -1137,4 +1149,81 @@ fn a_span_rounded_up_to_whole_ticks_is_not_reported_as_exhausted() {
     assert_eq!(exhausted(&played[1]), true);
     drop(s);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wav_amplitude_is_explicit_and_preserves_legacy_revision_audio() {
+    let root = workspace("normalization");
+    let mut s = Service::new(&root);
+    let values = vec![-32768, -32767, -16384, -1, 0, 1, 16384, 32767];
+    let id = source(
+        &mut s,
+        &root,
+        "edges.wav",
+        44100,
+        std::slice::from_ref(&values),
+    );
+    create(&mut s, "p", 480, None, false);
+    let added = edit(
+        &mut s,
+        "p",
+        "r1",
+        "add",
+        json!([
+            {"op":"add_clip","clip":clip("c", &id, 0, 480)}
+        ]),
+        json!({}),
+    );
+    assert_eq!(added.status, Status::Ok);
+    let legacy = render(&mut s, "p", "legacy", json!({"revision":"r2"}));
+    let legacy_bytes = std::fs::read(&legacy.artifacts[0].path).unwrap();
+    assert_eq!(frames(&legacy.artifacts[0].path)[0], [-32767; 2]);
+    let updated = edit(
+        &mut s,
+        "p",
+        "r2",
+        "normalize",
+        json!([
+            {"op":"update_clip","clip":{"id":"c","normalization":"wav_amplitude"}}
+        ]),
+        json!({}),
+    );
+    assert_eq!(updated.status, Status::Ok, "{updated:#?}");
+    drop(s);
+    let mut s = Service::new(&root);
+    let normalized = ok(
+        &mut s,
+        "render_batch",
+        json!({"job_id":"normalized", "project":"p", "format":"float32", "mixdown":false, "stems":{"by":"voice", "voices":["fx"]}}),
+    );
+    let bytes = std::fs::read(&normalized.artifacts[0].path).unwrap();
+    let wav = tunemend::wav::parse(&bytes).unwrap();
+    assert_eq!(wav.bits, 32);
+    for (frame, value) in wav.data.as_chunks::<8>().0.iter().zip(&values) {
+        for channel in frame.as_chunks::<4>().0 {
+            assert_eq!(f32::from_le_bytes(*channel), f32::from(*value) / 32768.0);
+        }
+    }
+    assert_eq!(
+        normalized.result["spans"][0]["clips"][0]["source_normalization"]["gain_from_normalized_wav"],
+        1.0
+    );
+    let old = render(&mut s, "p", "old-again", json!({"revision":"r2"}));
+    assert_eq!(std::fs::read(&old.artifacts[0].path).unwrap(), legacy_bytes);
+    let reverted = edit(
+        &mut s,
+        "p",
+        "r3",
+        "revert",
+        json!([
+            {"op":"update_clip","clip":{"id":"c","normalization":"pcm16_codes"}}
+        ]),
+        json!({}),
+    );
+    assert_eq!(reverted.status, Status::Ok);
+    let back = render(&mut s, "p", "back", json!({}));
+    assert_eq!(
+        std::fs::read(&back.artifacts[0].path).unwrap(),
+        legacy_bytes
+    );
 }

@@ -5,6 +5,14 @@
 //! starts at the first PCM sample at or after its exact time, so a sample
 //! index maps back to the composition through [`crate::timeline`].
 
+mod midi_stream;
+pub(crate) use midi_stream::project_preview_blockers;
+pub use midi_stream::{
+    MAX_SOURCE_RECEIVERS, SourceReceiver, SourceRender, has_timed_content, locate_source_sample,
+    midi_source_playback, midi_source_preview_problem, render_midi_sequence, render_midi_source,
+    type_2_sequences,
+};
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -52,6 +60,7 @@ pub enum RenderError {
     UnknownVoice(String),
     Synthesizer(String),
     Midi(String),
+    MidiEvents(Vec<crate::diagnostic::Diagnostic>),
     /// A chip instrument could not play its voice.
     Instrument(crate::diagnostic::Diagnostic),
     /// An audio clip could not play its source.
@@ -69,6 +78,15 @@ impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Midi(error) => write!(f, "{error}"),
+            Self::MidiEvents(errors) => write!(
+                f,
+                "{} MIDI playback blocker(s): {}",
+                errors.len(),
+                errors
+                    .first()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("unknown event")
+            ),
             Self::SoundFont(error) => write!(f, "the sound source could not be loaded: {error}"),
             Self::TooManyVoices(count) => write!(
                 f,
@@ -184,6 +202,7 @@ pub fn render_with_sources(
             voice: voice.to_string(),
             track: voice.to_string(),
             channel,
+            port: None,
         })
         .collect();
 
@@ -244,6 +263,7 @@ pub fn render_with_sources(
         let stems = assignments
             .iter()
             .map(|assignment| VoiceEvents {
+                effects: None,
                 voice: assignment.voice.clone(),
                 events: scheduled
                     .iter()
@@ -320,6 +340,7 @@ pub fn render_with_sources(
 /// render time, channel and message.
 struct VoiceEvents {
     voice: String,
+    effects: Option<bool>,
     events: Vec<(u64, Rational, u8, ChannelMessage)>,
 }
 
@@ -377,7 +398,7 @@ fn render_mixed(
             reports.push(chip.report);
             chip.signal
         } else {
-            let mut synth = synthesizer_for(&font, sample_rate, effects)?;
+            let mut synth = synthesizer_for(&font, sample_rate, stem.effects.unwrap_or(effects))?;
             let (mut left, mut right) = (Vec::with_capacity(length), Vec::with_capacity(length));
             for (sample, _, channel, message) in stem.events {
                 render_until(&mut synth, &mut left, &mut right, sample);
@@ -803,7 +824,8 @@ pub fn render_midi_with_sources(
     clips: &ClipSources,
     capture: Option<&StemCapture>,
 ) -> Result<(RenderedAudio, SourceReports), RenderError> {
-    use midly::{MidiMessage, Smf, TrackEventKind};
+    use crate::midi::{multiple_receivers, receiver_channel, source_voice};
+    use midly::{MetaMessage, Smf, TrackEventKind};
     let diagnostics = crate::midi::preview_blockers(bytes);
     if !diagnostics.is_empty() {
         return Err(RenderError::Midi(format!(
@@ -831,42 +853,51 @@ pub fn render_midi_with_sources(
         }
     }
     let smf = Smf::parse(bytes).map_err(|e| RenderError::Midi(e.to_string()))?;
+    let multiple = multiple_receivers(&smf);
+    let mut event_receivers = std::collections::BTreeMap::new();
+    let mut receiver_effects = std::collections::BTreeSet::new();
+    let selected_receivers: Vec<_> = imported
+        .assignments
+        .iter()
+        .filter(|a| voices.is_none_or(|selected| selected.contains(&a.voice)))
+        .map(|a| (a.port.unwrap_or(0), a.channel))
+        .collect();
     let mut events = Vec::new();
     for (track, messages) in smf.tracks.iter().enumerate() {
         let mut tick = 0;
+        let mut port = 0;
         for event in messages {
             tick += u64::from(event.delta.as_int());
+            if let TrackEventKind::Meta(MetaMessage::MidiPort(value)) = event.kind {
+                port = value.as_int();
+            }
             let TrackEventKind::Midi { channel, message } = event.kind else {
                 continue;
             };
-            let voice = format!("track{track}-ch{}", channel.as_int() + 1);
-            if voices.is_some_and(|selected| !selected.contains(&voice)) {
+            let voice = source_voice(track, receiver_channel(multiple, port, channel.as_int()));
+            event_receivers.insert(
+                voice.clone(),
+                (if multiple { port } else { 0 }, channel.as_int()),
+            );
+            let message = source_message(message);
+            if matches!(
+                message,
+                ChannelMessage::Controller {
+                    controller: 91 | 93,
+                    ..
+                }
+            ) {
+                receiver_effects.insert(if multiple { port } else { 0 });
+            }
+            if voices.is_some_and(|selected| !selected.contains(&voice))
+                && (matches!(
+                    message,
+                    ChannelMessage::NoteOn { .. } | ChannelMessage::NoteOff { .. }
+                ) || !selected_receivers
+                    .contains(&(if multiple { port } else { 0 }, channel.as_int())))
+            {
                 continue;
             }
-            let message = match message {
-                MidiMessage::NoteOff { key, vel } => ChannelMessage::NoteOff {
-                    key: key.as_int(),
-                    velocity: vel.as_int(),
-                },
-                MidiMessage::NoteOn { key, vel } if vel.as_int() == 0 => ChannelMessage::NoteOff {
-                    key: key.as_int(),
-                    velocity: 64,
-                },
-                MidiMessage::NoteOn { key, vel } => ChannelMessage::NoteOn {
-                    key: key.as_int(),
-                    velocity: vel.as_int(),
-                },
-                MidiMessage::Controller { controller, value } => ChannelMessage::Controller {
-                    controller: controller.as_int(),
-                    value: value.as_int(),
-                },
-                MidiMessage::ProgramChange { program } => ChannelMessage::Program(program.as_int()),
-                MidiMessage::PitchBend { bend } => ChannelMessage::PitchBend(bend.as_int()),
-                MidiMessage::ChannelAftertouch { vel } => {
-                    ChannelMessage::ChannelPressure(vel.as_int())
-                }
-                _ => unreachable!("preview blockers reject aftertouch"),
-            };
             events.push((
                 crate::performance::ChannelEvent {
                     at: tick,
@@ -877,6 +908,7 @@ pub fn render_midi_with_sources(
             ));
         }
     }
+    let receiver_of = |voice: &str| event_receivers[voice];
     // Stable sort: preserve every track's original order at an equal tick.
     events.sort_by_key(|(event, _)| event.at);
     let (start, end, passes) = match *layout {
@@ -886,10 +918,11 @@ pub fn render_midi_with_sources(
     let seconds = |tick| seconds_at(imported.timebase, composition, Rational::from_integer(tick));
     let loop_length =
         seconds(end.into()) - seconds(composition.playback.loop_start.unwrap_or(0).into());
-    let content = sample_at(
-        seconds(end.into()) + loop_length * i128::from(passes - 1),
-        sample_rate,
-    );
+    // Like source playback, the transport releases held notes and pedals at
+    // the content end of every layout: retained never-released notes stop
+    // there instead of ringing through the tail.
+    let content_end = seconds(end.into()) + loop_length * i128::from(passes - 1);
+    let content = sample_at(content_end, sample_rate);
     let mut scheduled = Vec::new();
     for pass in 0..passes {
         for (event, voice) in &events {
@@ -921,18 +954,19 @@ pub fn render_midi_with_sources(
             .iter()
             .filter(|v| voices.is_none_or(|selected| selected.contains(&v.id)))
             .map(|v| {
-                let channels: Vec<u8> = scheduled
+                let channels: Vec<_> = scheduled
                     .iter()
                     .filter(|(_, _, _, voice)| **voice == v.id)
-                    .map(|(_, _, event, _)| event.channel)
+                    .map(|(_, _, _, voice)| receiver_of(voice))
                     .collect();
                 VoiceEvents {
                     voice: v.id.clone(),
+                    effects: multiple.then(|| receiver_effects.contains(&receiver_of(&v.id).0)),
                     events: scheduled
                         .iter()
                         .filter(|(_, _, event, voice)| {
                             **voice == v.id
-                                || (channels.contains(&event.channel)
+                                || (channels.contains(&receiver_of(voice))
                                     && !matches!(
                                         event.message,
                                         ChannelMessage::NoteOn { .. }
@@ -985,7 +1019,7 @@ pub fn render_midi_with_sources(
             sample_rate,
             effects,
             content,
-            matches!(layout, RenderLayout::Excerpt { .. }).then(|| seconds(end.into())),
+            Some(content_end),
             instruments,
             clip_signals,
         )?;
@@ -1008,6 +1042,35 @@ pub fn render_midi_with_sources(
             },
         ));
     }
+    if multiple {
+        // Keep receivers even when an excerpt or voice selection schedules no events.
+        let mut ports: Vec<_> = event_receivers
+            .values()
+            .map(|receiver| receiver.0)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        let font = load_font(sound_font)?;
+        let mut synths = ports
+            .iter()
+            .map(|port| {
+                let effects = receiver_effects.contains(port);
+                synthesizer_for(&font, sample_rate, effects)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut sum = midi_stream::Mixdown::default();
+        for (sample, _, event, voice) in scheduled {
+            sum.advance(&mut synths, sample);
+            let receiver = ports
+                .binary_search(&receiver_of(voice).0)
+                .expect("scheduled receiver");
+            send(&mut synths[receiver], event.channel, event.message);
+        }
+        return Ok((
+            sum.finish(synths, content, sample_rate, crop),
+            SourceReports::default(),
+        ));
+    }
     let mut synth = synthesizer(sound_font, sample_rate, effects)?;
     let (mut left, mut right) = (Vec::new(), Vec::new());
     for (sample, _, event, _) in scheduled {
@@ -1015,12 +1078,36 @@ pub fn render_midi_with_sources(
         send(&mut synth, event.channel, event.message);
     }
     render_until(&mut synth, &mut left, &mut right, content);
-    if matches!(layout, RenderLayout::Excerpt { .. }) {
-        release_every_note(&mut synth);
-    }
+    release_every_note(&mut synth);
     let mut audio = finish_audio(synth, left, right, content, sample_rate)?;
     audio.left.drain(..crop);
     audio.right.drain(..crop);
     audio.content_samples -= crop as u64;
     Ok((audio, SourceReports::default()))
+}
+
+fn source_message(message: midly::MidiMessage) -> ChannelMessage {
+    use midly::MidiMessage;
+    match message {
+        MidiMessage::NoteOff { key, vel } => ChannelMessage::NoteOff {
+            key: key.as_int(),
+            velocity: vel.as_int(),
+        },
+        MidiMessage::NoteOn { key, vel } if vel.as_int() == 0 => ChannelMessage::NoteOff {
+            key: key.as_int(),
+            velocity: 64,
+        },
+        MidiMessage::NoteOn { key, vel } => ChannelMessage::NoteOn {
+            key: key.as_int(),
+            velocity: vel.as_int(),
+        },
+        MidiMessage::Controller { controller, value } => ChannelMessage::Controller {
+            controller: controller.as_int(),
+            value: value.as_int(),
+        },
+        MidiMessage::ProgramChange { program } => ChannelMessage::Program(program.as_int()),
+        MidiMessage::PitchBend { bend } => ChannelMessage::PitchBend(bend.as_int()),
+        MidiMessage::ChannelAftertouch { vel } => ChannelMessage::ChannelPressure(vel.as_int()),
+        _ => unreachable!("preview blockers reject aftertouch"),
+    }
 }

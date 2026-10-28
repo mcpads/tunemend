@@ -1,6 +1,7 @@
 //! Data contract of Tunemend: the documents an agent reads and
 //! writes, and the checks that decide whether they are consistent.
 
+pub mod adx;
 pub mod audio_clips;
 pub mod ay;
 pub mod bundle;
@@ -13,15 +14,19 @@ pub mod export;
 pub mod fm;
 pub mod gb_apu;
 pub mod huc6280;
+pub mod md_dac;
 pub mod measure;
 pub mod midi;
 pub mod mix;
+pub mod nds_adpcm;
+pub mod nds_sound;
 pub mod nes_apu;
 pub mod opn;
 pub mod performance;
 pub mod profile;
 pub mod psg;
 pub mod psx_adpcm;
+pub mod psx_seq;
 pub mod render;
 pub mod review;
 pub mod review_server;
@@ -32,10 +37,13 @@ pub mod sample_wav;
 pub mod service;
 pub mod sound_chip;
 pub mod soundfont;
+pub mod spu_sequence;
+pub mod spu_voice;
 pub mod store;
 pub mod synth;
 pub mod target;
 pub mod timeline;
+pub mod vab;
 pub mod vgm;
 pub mod vgm_transform;
 pub mod vgm_usage;

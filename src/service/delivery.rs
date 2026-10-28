@@ -19,7 +19,7 @@ impl Service {
             return done(ToolResponse::refused(
                 Code::InvalidRange,
                 "/destination",
-                "the Converter writes only to a new folder under out/ or work/",
+                "the converter writes only to a new folder under out/ or work/",
             ));
         }
         let destination = self.workspace.join(relative);
@@ -33,7 +33,7 @@ impl Service {
         let converter = self.workspace.join(&input.converter);
         if !converter.is_file() {
             return Err(ToolResponse::error(format!(
-                "no Retro Music Converter executable at {}",
+                "no external frame converter executable at {}",
                 converter.display()
             )));
         }
@@ -74,7 +74,7 @@ impl Service {
             profile.as_deref(),
             &destination,
         )
-        .map_err(|e| ToolResponse::error(format!("the Converter could not run: {e}")))?;
+        .map_err(|e| ToolResponse::error(format!("the converter could not run: {e}")))?;
         let identity = |path: &Path| -> Value {
             std::fs::read(path).map(|bytes| json!({"path": path.display().to_string(), "sha256": sha256_hex(&bytes), "size": bytes.len()})).unwrap_or(Value::Null)
         };
@@ -121,7 +121,7 @@ impl Service {
             )
         } else {
             format!(
-                "the Converter refused or failed {} steps; see {}/report.json",
+                "the converter refused or failed {} steps; see {}/report.json",
                 refused.len(),
                 input.destination
             )
@@ -214,10 +214,30 @@ impl Service {
             true => with_section_markers(&revision.composition),
             false => revision.composition.clone(),
         };
+        let declared_ends = match &info.midi_source {
+            Some(source) if input.write_declared_ends => {
+                match crate::midi::declared_end_changes(source, &revision.composition, true) {
+                    Ok(written) => Some(written),
+                    Err(diagnostics) => {
+                        return done(ToolResponse::blocked(
+                            "the MIDI file was not written",
+                            diagnostics,
+                        ));
+                    }
+                }
+            }
+            _ => None,
+        };
         let midi = match info.midi_source.as_ref().map_or_else(
             || write_smf(info.timebase, &written, &plan),
             |source| {
-                crate::midi::write_preserving(source, info.timebase, &revision.composition, &plan)
+                crate::midi::write_preserving_declared(
+                    source,
+                    info.timebase,
+                    &revision.composition,
+                    &plan,
+                    input.write_declared_ends,
+                )
             },
         ) {
             Ok(midi) => midi,
@@ -249,6 +269,7 @@ impl Service {
             .concat(),
             midi_exports: reader.documents(&input.project, "midi_export")?,
             references,
+            source_reviews: super::source_review::stored_source_reviews(&reader, &info)?,
         };
         bundle.midi_exports.push(plan.clone());
         let problems = check_project_bundle(&bundle);
@@ -361,6 +382,9 @@ impl Service {
             bundle.renders.retain(|r| !omitted.contains(&r.id.as_str()));
         }
 
+        if let Some(problem) = super::source_review::absent_source_audio(store, &bundle) {
+            return done(problem);
+        }
         let copies = if input.named_copies {
             named_copies(&included)
         } else {
@@ -393,6 +417,11 @@ impl Service {
                 let bytes = std::fs::read(store.object_path(&record.object))?;
                 files.push(("wav".into(), render_file(&record.render.id), bytes));
             }
+            for render in bundle.source_reviews.iter().flat_map(|r| &r.renders) {
+                let bytes = std::fs::read(store.object_path(&render.sha256))?;
+                let path = super::source_review::source_render_file(&render.id);
+                files.push(("source_wav".into(), path, bytes));
+            }
             for (path, id) in &copies {
                 let bytes = files
                     .iter()
@@ -413,6 +442,10 @@ impl Service {
                 }
             }
             let mut report = export_report(&info, &revision, &plan, &files, (&included, &copies));
+            if let Some(written) = &declared_ends {
+                report["declared_ends_written"] = json!({"notes": written,
+                    "scope": "write_declared_ends: every declared-end note's release written at its projected end; the delivered MIDI differs from the original at these events"});
+            }
             if !bundle.references.is_empty() {
                 report["referenced_data"] = json!({
                     "records": bundle.references.iter().map(|r| json!({"collection": r.collection, "id": r.id})).collect::<Vec<_>>(),
@@ -458,9 +491,24 @@ impl Service {
                 RenderRecords::Delivered => "render_records delivered: the omitted renders' records are not in the bundle, so it imports without regeneration",
             })}),
         );
+        if let Some(reviews) = &bundle.source_reviews {
+            response.result["source_reviews"] = super::source_review::delivered_summary(reviews);
+        }
+        if let Some(written) = &declared_ends {
+            response.result["declared_ends_written"] = json!(written);
+        }
         if input.named_copies {
             response.result["named_copies"] = json!({
-                "files": copies.iter().map(|(path, id)| json!({"path": path, "render": id, "copy_of": render_file(id)})).collect::<Vec<_>>(),
+                "files": copies.iter().map(|(path, id)| {
+                    let render = included.iter().find(|r| &r.render.id == id).map(|r| &r.render);
+                    let role = match render.and_then(|r| r.part.as_ref()) {
+                        None | Some(crate::review::RenderPart::Mixdown) => "mixdown",
+                        Some(_) => "stem",
+                    };
+                    json!({"path": path, "render": id, "copy_of": render_file(id), "role": role,
+                        "revision": render.map(|r| &r.revision),
+                        "delivered_revision": render.is_some_and(|r| r.revision == revision.id)})
+                }).collect::<Vec<_>>(),
                 "note": "byte-identical copies under readable names for people; import_project reads renders/<render id>.wav only, and report.json lists both",
             });
         }
@@ -548,6 +596,7 @@ pub(super) fn default_assignments(
                 voice: voice.id.clone(),
                 track: voice.id.clone(),
                 channel,
+                port: None,
             });
         }
     }
@@ -581,10 +630,12 @@ fn file_name_part(text: &str) -> String {
 /// (section id) or `full`, `full-<n>-passes` or `excerpt-<start>-<end>`, and
 /// the part is `voice-<id>`, `bus-<id>`, `group-<id>` or `direct`. A
 /// voice-filtered render adds `-only-<voices>`, a pre-master stem
-/// `-pre-master`; renders that would share a path each add `-<render id>`.
+/// `-pre-master` and a cut tail `-tail-cut`. Renders that would share a path
+/// add `-<revision>`, and
+/// `-<revision>-<render id>` when the same revision still shares it.
 fn named_copies(renders: &[&RenderRecord]) -> Vec<(PathBuf, String)> {
     use crate::review::RenderPart;
-    let named: Vec<(String, String)> = renders
+    let named: Vec<(String, String, String)> = renders
         .iter()
         .map(|record| {
             let render = &record.render;
@@ -608,6 +659,10 @@ fn named_copies(renders: &[&RenderRecord]) -> Vec<(PathBuf, String)> {
             if render.pre_master {
                 suffix.push_str("-pre-master");
             }
+            // The tail policy is part of what the file is, like pre-master.
+            if render.tail_cut {
+                suffix.push_str("-tail-cut");
+            }
             let stem = match &render.part {
                 None | Some(RenderPart::Mixdown) => None,
                 Some(RenderPart::Voice { id }) => Some(format!("voice-{}", file_name_part(id))),
@@ -619,17 +674,27 @@ fn named_copies(renders: &[&RenderRecord]) -> Vec<(PathBuf, String)> {
                 None => format!("mix/{span}{suffix}"),
                 Some(part) => format!("stems/{span}/{part}{suffix}"),
             };
-            (base, render.id.clone())
+            (base, render.revision.clone(), render.id.clone())
         })
         .collect();
     named
         .iter()
-        .map(|(base, id)| {
-            let shared = named.iter().filter(|(other, _)| other == base).count() > 1;
-            let name = if shared {
-                format!("{base}-{}.wav", file_name_part(id))
-            } else {
-                format!("{base}.wav")
+        .map(|(base, revision, id)| {
+            let shared = |same_revision: bool| {
+                named
+                    .iter()
+                    .filter(|(other, r, _)| other == base && (!same_revision || r == revision))
+                    .count()
+                    > 1
+            };
+            let name = match (shared(false), shared(true)) {
+                (false, _) => format!("{base}.wav"),
+                (true, false) => format!("{base}-{}.wav", file_name_part(revision)),
+                (true, true) => format!(
+                    "{base}-{}-{}.wav",
+                    file_name_part(revision),
+                    file_name_part(id)
+                ),
             };
             (name.split('/').collect::<PathBuf>(), id.clone())
         })

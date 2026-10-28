@@ -74,7 +74,9 @@ requires a separate interpretation. Original loading remains available.
 3. Call `copy_instrument`. It creates a new bank; neither input changes. Exact
    existing samples reuse storage. Default `placement: "append"` uses declared
    free memory. Explicit `placement: "replace"` requires exclusive storage large
-   enough for the source. Shared storage and insufficient capacity refuse.
+   enough for the source inside the bank module (compare a slot's `start` with
+   the summary's `bank_start`/`bank_end`). Shared storage, a sample in a resident or other
+   sample module, and insufficient capacity refuse.
 4. If an exact table/program is missing, inspect `references` and choose unused
    indices in `table_allocation`: `pitch`, `adsr`, `volume`, `vibrato`, or `gain`.
    Allocate only missing contents. The tool checks loaded native references,

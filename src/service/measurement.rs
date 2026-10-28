@@ -26,6 +26,9 @@ pub struct AudioInput {
     /// Refuse when the file's SHA-256 differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
+    /// Zero-based channel to measure alone; omitted measures all channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u16>,
 }
 
 /// Part of the input to measure, in seconds from its start.
@@ -236,6 +239,9 @@ impl Service {
             ));
         }
         let mut description = description;
+        if let Some(channel) = input.channel {
+            description["channel"] = json!(channel);
+        }
         description["sha256"] = json!(sha256);
         Ok((bytes, description, location))
     }
@@ -248,6 +254,15 @@ impl Service {
     ) -> Result<Loaded, ToolResponse> {
         let (bytes, description, location) = self.audio_bytes(input, pointer)?;
         let format = wav::read_header(&bytes).map_err(|e| audio_refused(&location, &e))?;
+        if let Some(channel) = input.channel
+            && channel >= format.channels
+        {
+            return Err(ToolResponse::refused(
+                Code::ValueOutOfRange,
+                &format!("{pointer}/channel"),
+                format!("channel {channel} is outside 0..{}", format.channels),
+            ));
+        }
         let rate = f64::from(format.sample_rate);
         let duration = format.duration_seconds();
         let range = range.unwrap_or(AudioRange {
@@ -297,8 +312,11 @@ impl Service {
                 ),
             ));
         }
-        let channels = wav::decode(&bytes, &format, start_frame, frames)
+        let mut channels = wav::decode(&bytes, &format, start_frame, frames)
             .map_err(|e| audio_refused(&location, &e))?;
+        if let Some(channel) = input.channel {
+            channels = vec![channels.swap_remove(usize::from(channel))];
+        }
         let mut description = description;
         description["format"] = serde_json::to_value(&format).expect("serializes");
         description["duration_seconds"] = json!(duration);
@@ -434,13 +452,15 @@ impl Service {
             "/candidate",
         )?;
         let (r, c) = (&reference.format, &candidate.format);
-        if r.sample_rate != c.sample_rate || r.channels != c.channels {
+        let reference_channels = reference.audio.channels.len();
+        let candidate_channels = candidate.audio.channels.len();
+        if r.sample_rate != c.sample_rate || reference_channels != candidate_channels {
             return done(ToolResponse::refused(
                 Code::ValueOutOfRange,
                 "/candidate",
                 format!(
                     "the candidate has {} channels at {} Hz but the reference has {} at {} Hz; Tunemend does not resample or remix for comparison",
-                    c.channels, c.sample_rate, r.channels, r.sample_rate
+                    candidate_channels, c.sample_rate, reference_channels, r.sample_rate
                 ),
             ));
         }

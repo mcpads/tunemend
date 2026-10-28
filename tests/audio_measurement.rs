@@ -444,3 +444,70 @@ fn pitch_is_tracked_compared_and_its_settings_checked() {
         json!({"audio": {"path": "long.wav"}, "pitch": {"windows": false}, "spectrum": "none"}),
     ));
 }
+
+#[test]
+fn selected_channels_compare_without_remixing_and_keep_source_identity() {
+    let workspace = Workspace::new("channels");
+    let left = sine(8000, 440.0, 0.5, 0.5);
+    let right = sine(8000, 880.0, 0.25, 0.5);
+    workspace.write(
+        "stereo.wav",
+        &encode(&[left.clone(), right.clone()], 8000, SampleEncoding::PcmS16),
+    );
+    workspace.write(
+        "right.wav",
+        &encode(std::slice::from_ref(&right), 8000, SampleEncoding::PcmS16),
+    );
+    workspace.write(
+        "swapped.wav",
+        &encode(&[right, left], 8000, SampleEncoding::PcmS16),
+    );
+    let mut service = Service::new(&workspace.path);
+    let whole = ok(service.call("measure_audio", json!({"audio":{"path":"stereo.wav"}})));
+    let selected = ok(service.call("audio", json!({"operation":"measure_audio", "arguments":{"audio":{"path":"stereo.wav","channel":1},"per_channel":true}})));
+    assert_eq!(selected["input"]["sha256"], whole["input"]["sha256"]);
+    assert_eq!(selected["input"]["format"]["channels"], 2);
+    assert_eq!(selected["input"]["channel"], 1);
+    let mono = ok(service.call(
+        "measure_audio",
+        json!({"audio":{"path":"right.wav"},"per_channel":true}),
+    ));
+    assert_eq!(selected["levels"], mono["levels"]);
+    assert_eq!(selected["loudness"], mono["loudness"]);
+    for candidate in [
+        json!({"path":"right.wav"}),
+        json!({"path":"swapped.wav","channel":0}),
+    ] {
+        let comparison = ok(service.call("audio", json!({"operation":"compare_audio","arguments":{"reference":{"path":"stereo.wav","channel":1},"candidate":candidate}})));
+        assert_eq!(comparison["difference"]["identical"], true);
+    }
+    let different = ok(service.call(
+        "compare_audio",
+        json!({"reference":{"path":"stereo.wav","channel":0},"candidate":{"path":"right.wav"}}),
+    ));
+    assert_eq!(different["difference"]["identical"], false);
+    for (operation, args, pointer) in [
+        (
+            "measure_audio",
+            json!({"audio":{"path":"stereo.wav","channel":2}}),
+            "/audio/channel",
+        ),
+        (
+            "compare_audio",
+            json!({"reference":{"path":"right.wav"},"candidate":{"path":"stereo.wav","channel":2}}),
+            "/candidate/channel",
+        ),
+        (
+            "compare_audio",
+            json!({"reference":{"path":"stereo.wav"},"candidate":{"path":"right.wav"}}),
+            "/candidate",
+        ),
+    ] {
+        assert_eq!(refusal(&service.call(operation, args)).1, pointer);
+    }
+    let bad_hash = service.call(
+        "measure_audio",
+        json!({"audio":{"path":"stereo.wav","channel":1,"expected_sha256":"wrong"}}),
+    );
+    assert_eq!(bad_hash.status, Status::Blocked);
+}

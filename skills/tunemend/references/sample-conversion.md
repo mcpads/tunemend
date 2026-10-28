@@ -8,16 +8,21 @@ console name.
 `prepare_sample` takes either `source` plus `offset`/optional `length`, or `bank`
 plus `slot`. Source slices declare `encoding`: `brr`, `u8`, `s8`, `s16le`,
 `s16be`, `psx_adpcm` (PlayStation SPU ADPCM blocks), `vag` for a complete VAG
-file, or `wav` for a complete RIFF/WAVE file inside the slice; bank inputs
+file, `md_dac4` (Mega Drive DAC values packed two per byte), or `wav` for a
+complete RIFF/WAVE file inside the slice; bank inputs
 require `brr` and use the stored loop address. Supply an explicit `sample_rate`
-and a `target` encoding (`brr`, `u8`, `s8`, `s16le`, `s16be`, `psx_adpcm` or
-`vag`). The codec is built in. You may pass `codec` with a trusted external script that speaks the
+and a `target` encoding (`brr`, `u8`, `s8`, `s16le`, `s16be`, `psx_adpcm`,
+`vag` or `md_dac4`). The codec is built in. You may pass `codec` with a trusted external script that speaks the
 same JSON protocol (run with `python`, default `python3`); it is executable code,
 so use only one you trust. It supports only raw encodings with
 `loop_policy: "finite"`, without `wav`, `target_sample_rate`, `root`,
-`psx_adpcm` or PSX ADPCM/VAG sides.
+`psx_adpcm`, `md_dac` or PSX ADPCM/VAG/`md_dac4` sides.
 
-The codec accepts at most 131072 decoded mono samples. BRR requires complete
+The codec accepts at most 8388608 decoded mono samples, including expanded
+loop traversals (about 190 seconds at 44.1 kHz). Raw slices are limited to 16 MiB;
+WAV containers to 64 MiB. Target block padding and termination must also fit.
+Long loops retain complete PCM, seam and level checks; pitch/period analysis is
+omitted above 131072 loop samples and reported as not run. BRR requires complete
 nine-byte blocks ending exactly at the final end flag. A looping source requires
 an aligned `loop_offset` for raw slices. Choose how a loop reaches the target:
 
@@ -56,8 +61,8 @@ sounding pitch; use the bank's tuning data or a stated reference when it matters
 ## WAV sources
 
 `encoding: "wav"` reads integer PCM 8/16/24/32-bit and IEEE float 32/64-bit,
-plain or as `WAVE_FORMAT_EXTENSIBLE`, with 1..32 channels, at most 131072
-frames and at most 8 MiB.
+plain or as `WAVE_FORMAT_EXTENSIBLE`, with 1..32 channels, at most 8388608
+frames and at most 64 MiB.
 Compressed WAV formats such as ADPCM, RIFX and RF64 are refused. Before
 preparing, `inspect_instrument_source` with the source shows under
 `discovery.formats[0].wav` what `prepare_sample` will read: format, channels,
@@ -162,6 +167,234 @@ predictions differently, so their output can differ by a few to tens of units
 on filters 1-4 even for the same bytes. Report Tunemend's decoded values as the
 documented reading, not as what a console plays.
 
+## Mega Drive packed 4-bit DAC samples
+
+`md_dac4` is headerless sample data for the YM2612 DAC: each byte holds two
+DAC values, each nibble being the upper four bits of the 8-bit value (lower
+bits zero). The bytes carry no length, rate, loop or end marker, so the
+slice is the whole sample and three things are always yours to declare:
+
+- `md_dac.nibble_order`: `high_first` (bits 4-7 play first) or `low_first`.
+  It is required whenever the encoding or target is `md_dac4` and refused
+  otherwise. It is a property of the driver that plays the data, not of the
+  bytes; take it from the driver context you were given. It was observed as
+  `high_first` for one driver family; nothing in the data proves the order,
+  and a wrong order still decodes, so never pick it by trying both.
+- `offset` and `length`: where the sample starts and ends inside a bank,
+  ROM or extracted file. Use the driver's sample table or another verified
+  source for both. The bytes cannot be recognized: for a file named
+  `.packed4`, and only when nothing else matches, discovery lists
+  `md_dac4_candidate` with `basis` "file name only" and what still has to be
+  declared. It is a pointer to this section, not a format identification;
+  other headerless files (banks, ROMs) get no hint.
+- `sample_rate`: the driver's DAC write rate, set by its timing loop. It is
+  not in the data. Take it from the driver context when you have it;
+  otherwise measure it from a reference capture
+  ([choosing the rate](#choosing-an-md_dac4-sample-rate)). Either way it is a
+  playback assumption, like a BRR rate: state its source.
+
+The decoding is linear: PCM16 = (nibble - 8) * 4096. A `u8` target gives the
+8-bit DAC values exactly (`sample_values_exact` with no changes); `s16le`
+gives PCM16 exactly; `md_dac4` to `md_dac4` with the same order is
+byte-identical. The report's `md_dac` section gives the declared layout, the
+coordinates of sample k (slice byte k / 2 and which nibble), byte and sample
+counts, the nibble histogram and range, the counts of nibbles 0 and 15
+(values at the extremes) and the first bytes with their DAC values.
+
+Encoding PCM to `md_dac4` rounds each sample to the nearest of 16 levels
+(`floor((pcm16 + 2048) / 4096) + 8`, clamped to 0..15). This loses 12 bits;
+expect `sample_values` with errors up to half a level (2048 PCM16 units) on
+real material, and values above +30719 clamp to the top level
+(`md_dac_target.clamped_samples`). An odd sample count gets one midpoint
+nibble (8), reported as `padding`. Accept those kinds at export only when the
+request allows a 4-bit result. Resample with `target_sample_rate` to the
+declared driver rate; the target plays at whatever rate the driver uses.
+
+The format holds no loop. `loop_policy: "finite"` refuses a `loop_offset` on
+an `md_dac4` source (there is nothing to bake). `loop_policy: "preserve"`
+needs `loop_offset` (a slice byte) on such a source; a target loop must start
+and end on whole bytes (an even sample start and length), otherwise the call
+refuses with recoveries ([loop fit](#loop-fit-and-loop-diagnostics)). The
+target's `target_loop_offset` is reported in `report.json` only; the driver
+must be told about it some other way.
+
+Refusals name the field (`/md_dac`, `/md_dac/nibble_order`) or the slice
+byte where the 8388608-sample limit (4194304 bytes) is reached. An empty slice
+is refused. The external codec is not available for `md_dac4`.
+
+`md_dac4` is a sample representation, not a driver bank: replacing a sample
+in a game also needs the driver's table entry (pointer, length, timing) and
+bank placement, which consumer integration owns.
+
+### Choosing an md_dac4 sample rate
+
+Without driver documentation, the rate can be measured from a recording of the
+driver playing the same sample (an emulator or hardware capture). Tunemend does
+not estimate it for you; you compare trial rates:
+
+1. Bracket it: `measure_audio` on the capture gives `silence.leading_seconds`
+   and `trailing_seconds`; samples / active seconds is a rough rate. It depends
+   on the silence threshold (a few percent), so treat it only as a range.
+2. Make a mono copy of the capture: `prepare_sample` with `encoding: "wav"`,
+   `wav.channel: 0` and target `s16le` at the capture's rate (`compare_audio`
+   needs the same channel count and rate; WAV sources hold at most 8388608
+   frames, so a longer capture cannot be compared this way).
+3. Coarse sweep: for trial rates across the range in about 50 Hz steps,
+   prepare the payload as `md_dac4` with that `sample_rate`,
+   `target_sample_rate` set to the capture's rate and target `s16le`, export
+   it, and `compare_audio` the mono capture (reference) with its `target.wav`
+   (candidate), `max_offset_seconds: 0.05` and `candidate_range` of the first
+   0.1 s. Keep the rate with the highest `difference.alignment.correlation`.
+4. Fine sweep around it in 1-2 Hz steps over the full length. The true rate
+   gives a narrow correlation peak with a steady `offset_samples` (on three real
+   captures: 0.86-0.95 at the peak, a few hundredths lower 1 Hz off, about
+   0.5 at 5 Hz off). A flat curve or a peak below about 0.7 means the order,
+   extent or capture does not match: do not pick the best of bad fits.
+5. Report the result as an assumption: the capture's identity, the rate and
+   step, the peak correlation, and that it describes that capture's playback,
+   not a documented driver rate. A reference recording is usually filtered and
+   DC-blocked, so correlation stays below 1 even at the right rate.
+
+## CRI ADX streams
+
+ADX is a stream format (Saturn, Dreamcast and later CD titles), not a sample
+plan: streams are minutes long and often stereo, so they have their own tools.
+Retain the file with `load_instrument_source`; discovery reports `format:
+"adx"` with version, channels, rate, samples, highpass and loop state, or
+`unusable` with the byte that stops interpretation. Retention and
+`export_instrument_source` never depend on that.
+
+- `inspect_adx` `summary` gives every interpreted value, `unknown_header_bytes`
+  (offset, length, nonzero count), the loop in samples and absolute byte
+  offsets with `start_byte_consistent`/`end_byte_consistent`, and the `end`
+  word (`0x8001`, padding length, nonzero padding, trailing bytes). `header`
+  lists each field's offset and raw bytes; `blocks` pages block rows;
+  `samples` pages decoded frames with the byte, nibble, scale and prediction
+  behind every value. Follow `next_cursor` as `offset`.
+- `render_adx` writes `decoded.wav` (PCM16 at the header rate), the exact
+  `original.adx` and `render.json`, and retains the WAV as `decoded_source`:
+  pass it to `encode_adx` (the response's `encode_adx.arguments` already holds
+  the source, highpass and loop) or, for one channel of at most 8388608 frames,
+  to `prepare_sample` without loading it again. `measure_with.audio` goes to
+  `measure_audio` and `compare_audio`. The `stream` span keeps the loop as an
+  `smpl` loop (end inclusive = loop end - 1). `loop` with `passes` unrolls the
+  loop with carried decoder history and reports `reentry_check`: the history at
+  the first entry and at the jump, and how the second traversal differs from
+  the first (`differing_frames`, `max_abs_difference`, `identical_from_frame`,
+  `seam_step`). A difference there is how the stream itself loops, not a
+  decoding error. `frames` decodes a range from the stream start, so its values
+  equal the stream render; a mono range of at most 8388608 frames (choose a
+  channel with `wav.channel` in `prepare_sample`) is how ADX audio becomes a
+  sample plan source.
+- Refusals name the byte: encoding types other than 3 (2 preset coefficients,
+  4 exponential scale, 0x10/0x11 AHX), flags 0x08 (encrypted) and any other
+  nonzero flags, scale words above 0x1FFF, inconsistent loop fields and
+  truncated data. There is no key handling; an encrypted stream stays retained
+  but is not decoded. Report the refusal instead of guessing.
+
+The default arithmetic `fixed_12` rounds the derived coefficients to 4.12 fixed
+point and keeps clamped history; `arithmetic: "float_reference"` follows the
+floating-point description (truncated prediction, unclamped history) and can
+differ by tens of units. Report decoded values as Tunemend's declared reading,
+not as what a console plays.
+
+`encode_adx` writes a new retained ADX (version 3, type 3, 18-byte blocks) from
+a retained PCM16 WAV. Declare `highpass_frequency` (observed CRI streams use
+500); `loop_frames` takes a start on a 32-frame boundary and an exclusive end
+(the refusal names the nearest starts). For a start off the boundary,
+`loop_start_padding: true` prepends silent frames to reach it, writes their
+count to the header's loop alignment field as CRI streams do, and reports
+`lead_in_padding` (every frame moves later by that count); `sector_bytes` (such as 2048) aligns the
+loop-start byte and file length as CD streams do. ADPCM is lossy: the first
+call refuses with `adpcm_quantization` and per-channel error, and a WAV whose
+`smpl` loop, root or other chunks are not carried adds
+`wav_metadata_not_carried`. Accept only changes compatible with the request in
+`accept_changes`, with a new `job_id`. The result's `readback` and
+`loop_reentry` come from parsing the written bytes again; compare
+`decoded.wav` with the source WAV using `compare_audio`.
+
+Expect a click at the loop jump when the loop's last two frames differ from the
+two frames before its start: the decoder keeps its history across the jump,
+and the encoder codes the loop-start block for the history of the first pass.
+A whole-file loop (start 0) enters with silence the first time, so unless the
+file ends near zero the second traversal starts with a transient: on test tones
+up to about 11600 units for a loud loop end, about 750 for a zero-crossing
+start. Check `loop_reentry` (`max_abs_difference`, `identical_from_frame`) and
+listen to a `loop` render with 2 passes. To reduce it, start the loop after a
+lead-in: a lead-in that is a whole number of periods of steady material
+re-enters identically, and copying the loop's last 32 frames before its start
+cut the measured transient by 4 to 12 times. Otherwise let `rank_adx_loops` choose candidates: give the WAV, the highpass
+you will encode with, a start range and an end range (exclusive ends; at most
+1,000,000 pairs). It ranks 32-frame-aligned starts with ends by the predicted
+re-entry difference and returns each candidate's `loop_frames`, predicted
+difference and settle frames. It applies nothing: pass the chosen
+`loop_frames` to `encode_adx`, then check `loop_reentry` and listen to a
+`loop` render, because quantization is not in the prediction (on a corpus
+jingle the predictions were within about 10% of the measurements; an abrupt
+attack just before the loop start can measure well above the prediction). Corpus loops start after a lead-in and still differ for tens to
+hundreds of frames; that is how those streams loop.
+
+## Nintendo DS sound data
+
+DS sound files are SDAT archives and their members: SWAR wave archives (each
+wave a PCM8, PCM16 or IMA-ADPCM SWAV block, looped or one-shot), standalone
+SWAV, SBNK instrument banks and STRM streams. Load the file with
+`load_instrument_source`; discovery names it (`nds_swar`, `nds_sdat`, ...).
+Then use `inspect_nds_sound`:
+
+- `summary` first: header, counts, encodings, storage layout and refusals.
+  For an SDAT it counts members by kind; `view: "members"` pages the FAT
+  files with their SYMB names and INFO references (a bank's four wave
+  archives, a sequence's bank, a stream's volume). Pass `member` (a FAT
+  index) to interpret one member in place; offsets are then member-relative
+  and `member_offset` locates them in the SDAT.
+- `waves` and `wave` (`index`) for SWAR/SWAV. `wave` decodes the wave and
+  gives its readback hash, loop start sample, IMA-ADPCM header and loop
+  state, and how to reach `prepare_sample`.
+- `instruments` for an SBNK: type (empty, single, drum set, key split or
+  undocumented), each note definition's SWAV index, wave-archive slot, base
+  note, attack, decay, sustain, release and pan. Only as an SDAT member does
+  the slot resolve to a FAT member and say whether the SWAV index exists
+  (`swav_in_range`).
+- `blocks` for an IMA-ADPCM STRM: each block's own header per channel.
+
+Refusals name the byte (`/source/bytes/N` or `/member/M/bytes/N`) and field;
+the original stays retained. A refused wave or instrument does not hide the
+others: the summary lists them. Do not repair a file to get past a refusal.
+
+`export_nds_sample` writes one wave (`wave`) or one stream channel
+(`channel`) to a new folder: `original.bin` (the exact bytes),
+`decoded.wav` (mono PCM16 at the header's rate, with a `smpl` loop when the
+source loops), `report.json`, and with `audition_loops` an `audition.wav`
+with that many loop traversals baked in. The rate is the header's
+`sample_rate`; the report also gives the timer's rate and the difference in
+cents. `root_note` sets the WAV unity note; the SWAV itself has none, and an
+SBNK definition's `base_note` is that bank's choice for that note range. The
+decoded WAV is retained: pass the report's `prepare_sample.arguments` (add
+`job_id` and `target`) to convert it, with `loop_policy: "preserve"` and
+`wav.smpl_loop: 0` for a loop. PCM8/PCM16 waves are also direct raw slices
+(`s8`/`s16le`); `wave` view gives those arguments. Streams longer than 8388608
+samples exceed `prepare_sample`; use the WAV directly or an excerpt.
+
+`replace_nds_wave` writes a new SWAR with one wave replaced, from a retained
+WAV (`channel` for multi-channel files) at that WAV's rate; resample first with
+`prepare_sample` `target_sample_rate` and use its `target.wav`. Choose
+`encoding` (`pcm8`, `pcm16`, `ima_adpcm`). A loop comes from
+`loop_start_frame` or `smpl_loop` and must start and repeat on whole 32-bit
+words: multiples of 4 (PCM8), 2 (PCM16) or 8 (IMA-ADPCM) samples; the refusal
+lists fitting starts. One-shots are padded with zeros to a word. Accept only
+the reported changes you intend: `sample_values` (lossy encoding),
+`bit_depth_reduction`, `padding`. The report lists every moved offset and
+changed header field and confirms every other wave is byte-identical. For an
+SDAT member the result is a standalone SWAR: the SDAT, its FAT and any SBNK
+are not rebuilt, and inserting it is the consumer's job.
+
+The decoded values follow the documented DS arithmetic, which clamps at
+-7FFFh; another decoder that clamps at -8000h differs by one unit after a
+negative saturation. The audition is the decoded samples only: no DS mixer,
+interpolation, SBNK envelope or sequence playback. SSEQ and SSAR are
+retained with their header reported; they are not played.
+
 ## Root pitch and the SNES pitch register
 
 `root: {"note": 0..127, "cents": -100..100}` records the note the sample sounds
@@ -174,6 +407,25 @@ gives `snes_pitch`: `original_pitch` is the 14-bit S-DSP pitch register value
 notes whose in-tune register fits 1..0x3FFF. A value outside that range reports
 `in_range: false`. These are computed values, not observed playback; envelopes,
 interpolation and driver pitch tables are separate.
+
+## Level changes
+
+`gain_db` (−96..24 dB, non-zero) scales the decoded PCM16 stream at the
+source rate, before any resampling and before the target is encoded: each
+value is multiplied by 10^(gain_db / 20), rounded half away from zero and
+clamped to 16 bits. A negative gain therefore also gives the resampler
+headroom; any overshoot the resampler still produces is counted separately
+in `resampled.clipped_samples`. It is reported as the `gain` change with
+`factor`, `clipped_samples` (and
+`loop_traversal_clipped_samples` for a preserved loop), `peak_before`,
+`peak_after` and `measured_level_change_db`; the plan records `gain_db`.
+`sample_values` then compares the target with the scaled (and resampled)
+stream, so it measures only the target encoding. Accept `gain` at export like any other
+change. A positive gain that clips is still reported as requested; lower it
+or accept the clipping deliberately. Omitting `gain_db` (or passing 0) keeps
+the level and the plan of the same request without it. Use it, for example,
+for a quieter copy of a sample for a bank replacement, instead of a project
+render.
 
 ## Resampling
 
@@ -252,9 +504,10 @@ conversion's measured `changes`, loop, tuning and WAV facts, `brr_target` block
 facts and `loop_diagnostics`. `detail: "full"` returns the stored report and the
 whole `report_guide`. The report distinguishes
 `sample_values` (changed count, maximum absolute error and RMS in signed PCM16
-units), `padding` (BRR or PSX ADPCM block alignment and terminator), `finite_loop`, `resampled`,
+units), `padding` (BRR or PSX ADPCM block alignment and terminator, or the `md_dac4` byte fill), `finite_loop`, `resampled`,
 `channel_downmix`, `bit_depth_reduction`, `rate_reinterpreted`,
-`reserved_shift_interpreted` and `flag_bits_not_carried`. BRR to PCM16
+`reserved_shift_interpreted`, `flag_bits_not_carried` and `gain`; `md_dac4` targets
+report `sample_values` and `padding` as above. BRR to PCM16
 can preserve the finite decoded stream exactly. Eight-bit PCM quantization and
 BRR encoding can change samples. BRR encoding uses greedy block search; it is
 not an optimal compressor. Retaining the original does not make these changes
@@ -293,8 +546,8 @@ ID. Saved plans resume without input or codec paths. Stored identities and
 exported bytes are checked. Codec reports describe decoded samples, not hardware
 playback.
 
-`u8` is suitable sample data for a YM2612 DAC pipeline, not an FM patch or a
-complete MD song. BRR output is sample data, not a complete SFC bank; PSX ADPCM
+`u8` and `md_dac4` are suitable sample data for a YM2612 DAC pipeline, not an
+FM patch, a driver sample table or a complete MD song. BRR output is sample data, not a complete SFC bank; PSX ADPCM
 or VAG output is sample data, not a VAB bank or SPU memory image. No
 route establishes native insertion, looped instrument replacement, envelopes,
 interpolation, DAC timing, mixing or original sound equivalence. Reference WAVs

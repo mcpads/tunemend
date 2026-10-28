@@ -218,9 +218,29 @@ fn tempo_at(tempo_map: &[TempoChange], tick: u64) -> Option<u32> {
         .map(|t| t.microseconds_per_quarter)
 }
 
+/// Whether same-pitch notes of one voice may overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StackedNotes {
+    /// New music: overlapping same-pitch notes would pair ambiguously in MIDI.
+    Reject,
+    /// Source-backed MIDI keeps stacked source onsets as separate notes. The
+    /// source writer refuses any overlap the source did not contain and
+    /// verifies pairing by reading the edited file back.
+    SourcePaired,
+}
+
 pub(crate) fn check_composition(
     timebase: Timebase,
     composition: &Composition,
+    report: &mut Report,
+) {
+    check_composition_with(timebase, composition, StackedNotes::Reject, report);
+}
+
+pub(crate) fn check_composition_with(
+    timebase: Timebase,
+    composition: &Composition,
+    stacked: StackedNotes,
     report: &mut Report,
 ) {
     let end = composition.playback.end;
@@ -244,7 +264,7 @@ pub(crate) fn check_composition(
         }
     }
 
-    check_notes(composition, &voice_ids, report);
+    check_notes(composition, &voice_ids, stacked, report);
 
     for (i, marker) in composition.markers.iter().enumerate() {
         if marker.at > end {
@@ -439,7 +459,12 @@ fn check_timing(timebase: Timebase, composition: &Composition, report: &mut Repo
     }
 }
 
-fn check_notes(composition: &Composition, voice_ids: &HashSet<&str>, report: &mut Report) {
+fn check_notes(
+    composition: &Composition,
+    voice_ids: &HashSet<&str>,
+    stacked: StackedNotes,
+    report: &mut Report,
+) {
     let end = composition.playback.end;
     let mut note_ids = HashSet::new();
     let mut by_voice_pitch: BTreeMap<(&str, u8), Vec<usize>> = BTreeMap::new();
@@ -528,8 +553,10 @@ fn check_notes(composition: &Composition, voice_ids: &HashSet<&str>, report: &mu
             .push(i);
     }
 
-    for indices in by_voice_pitch.values_mut() {
-        report_overlaps(&composition.notes, indices, report, "the same voice");
+    if stacked == StackedNotes::Reject {
+        for indices in by_voice_pitch.values_mut() {
+            report_overlaps(&composition.notes, indices, report, "the same voice");
+        }
     }
 }
 

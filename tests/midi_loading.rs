@@ -328,6 +328,8 @@ fn source_edit_keeps_extended_metadata_and_unknown_smf_and_riff_chunks() {
     let source = MidiSource {
         sha256: tunemend::store::sha256_hex(&bytes),
         bytes: bytes.clone(),
+        declared_ends: None,
+        legacy_declared_ends: None,
     };
     let output = write_preserving(&source, imported.timebase, &edited, &plan).unwrap();
     let comparison = compare_midi(&bytes, &output);

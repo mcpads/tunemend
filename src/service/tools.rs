@@ -53,7 +53,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         definition::<CompareMidiInput>(
             "compare_midi",
             true,
-            "Compare byte identity and decoded MIDI events, including timing, ordering and opaque data.",
+            "Compare two MIDI files (workspace-relative paths) or loaded source IDs: byte identity and decoded events, including timing, ordering and opaque data. Tracks are aligned as event sequences, so an inserted event is one difference. Follow next_cursor as offset.",
         ),
         definition::<AnalyzeMidiInput>(
             "analyze_midi",
@@ -98,12 +98,12 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         definition::<RenderPreviewInput>(
             "render_preview",
             false,
-            "Render a revision, excerpt or voice selection to WAV through its instruments, clips, mixer and effects.",
+            "Render a project or retained MIDI source to WAV. Source playback needs no editable notes, plays each MIDI port on its own receiver and requires sequence for SMF type 2; keep_for_review also keeps it for present_review. Levels and warnings report samples beyond full scale; nothing is rescaled except by an explicit source gain_db.",
         ),
         definition::<RenderBatchInput>(
             "render_batch",
             false,
-            "Render mixdowns and stems by span or section. Read sum_check for summation limits; tail=cut removes decay tails. regenerate_renders restores missing audio with hash checks.",
+            "Render mixdowns and stems by span or section. Read sum_check for summation limits and each render's levels and the warnings for samples beyond full scale; tail=cut removes decay tails. regenerate_renders restores missing audio with hash checks.",
         ),
         definition::<MeasureAudioInput>(
             "measure_audio",
@@ -118,17 +118,17 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         definition::<PresentReviewInput>(
             "present_review",
             false,
-            "Present renders on the listening screen. MCP starts it automatically; keep the connection open. An identical retry after reconnect returns the same presentation with its live URL.",
+            "Present renders on the listening screen: project renders, or with source the source renders kept by render_preview keep_for_review. Warns about presented renders that clip. MCP starts it automatically; keep the connection open. An identical retry after reconnect returns the same presentation with its live URL.",
         ),
         definition::<ReadFeedbackInput>(
             "read_feedback",
             true,
-            "Read delivered marks with their original revision, loop pass and sounding notes. Continue with next_cursor as after_sequence.",
+            "Read delivered marks with their original revision, loop pass and sounding notes; with source, marks on source renders give source ticks and held retained event IDs instead. Continue with next_cursor as after_sequence.",
         ),
         definition::<RecordFeedbackInput>(
             "record_feedback",
             false,
-            "Record the person’s conversational feedback verbatim, optionally with marks on a presentation.",
+            "Record the person’s conversational feedback verbatim, optionally with marks on a presentation of a project or of a source.",
         ),
         definition::<ExportProjectInput>(
             "export_project",
@@ -138,7 +138,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         definition::<PrepareSampleInput>(
             "prepare_sample",
             false,
-            "Prepare BRR, PCM, WAV or PSX ADPCM/VAG conversion. Reports changes, loop fit and seam diagnostics before export; original bytes stay retained.",
+            "Prepare BRR, PCM, WAV, PSX ADPCM/VAG or Mega Drive packed 4-bit DAC (md_dac4, declared nibble order) conversion, with optional resampling and gain. Reports changes, loop fit and seam diagnostics before export; original bytes stay retained.",
         ),
         definition::<InspectSampleInput>(
             "inspect_sample",
@@ -190,6 +190,51 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             false,
             "Audition an OPN patch with declared chip, clock and playback context. Returns WAVs and register writes; unsupported chip features are reported or refused.",
         ),
+        definition::<LoadVabBankInput>(
+            "load_vab_bank",
+            false,
+            "Interpret a PlayStation VAB bank from retained sources: a VH and VB, or one combined VAB. Refuses inconsistent counts and sizes at their offsets; the sources stay exact either way.",
+        ),
+        definition::<InspectVabBankInput>(
+            "inspect_vab_bank",
+            true,
+            "Inspect VAB header fields, programs, tones (ADSR, tuning, VAG) and sample regions with offsets, loop flags and prepare_sample slices. Page with next_cursor as offset.",
+        ),
+        definition::<ReplaceVabSampleInput>(
+            "replace_vab_sample",
+            false,
+            "Replace one VAG region with a psx_adpcm/vag sample plan or another bank's region, in a new bank. layout fixed refuses size changes unless a smaller region is padded by accepting silent_padding; resize shifts later regions. Reports changed bytes and readback.",
+        ),
+        definition::<ExportVabBankInput>(
+            "export_vab_bank",
+            false,
+            "Export the exact VH/VB (or combined VAB), interpretation JSON and decoded first-pass WAVs with readback.",
+        ),
+        definition::<RenderVabToneInput>(
+            "render_vab_tone",
+            false,
+            "Audition one VAB tone on a documented SPU voice model: pitch from note and tuning, ADSR from the tone. Returns a 44100 Hz WAV; volumes, pan and driver behaviour are reported, not applied.",
+        ),
+        definition::<LoadPsxSequenceInput>(
+            "load_psx_sequence",
+            false,
+            "Interpret a PlayStation SEQ or SEP (pQES) from a retained source range: header, every event with its offset, NRPN loops and marks. Refuses unreadable events at their offsets; the source stays exact either way.",
+        ),
+        definition::<InspectPsxSequenceInput>(
+            "inspect_psx_sequence",
+            true,
+            "Inspect a PSX sequence: header fields, events with offsets and meanings, loops, the programs and keys it plays against a VAB bank (view binding), or the VAB headers in a container ranked by how many of its notes they cover (view binding_candidates). Page with next_cursor as offset.",
+        ),
+        definition::<ExportPsxSequenceInput>(
+            "export_psx_sequence",
+            false,
+            "Export the exact SEQ/SEP bytes, one Standard MIDI File per sequence (every event kept, readback checked; what MIDI cannot hold is listed) and the interpretation JSON. The MIDI files load with load_midi.",
+        ),
+        definition::<RenderPsxSequenceInput>(
+            "render_psx_sequence",
+            false,
+            "Audition one sequence against a VAB bank on at most 24 documented SPU voice models with declared volume, pan, bend and loop readings. Returns a bounded stereo float WAV with levels and full-scale warnings (optional gain_db); voice overflow refuses unless a policy is chosen.",
+        ),
         definition::<LoadInstrumentSourceInput>(
             "load_instrument_source",
             false,
@@ -219,6 +264,41 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             "transform_vgm",
             false,
             "Derive a VGM by same-family edits or SN76489-to-AY mapping. Preserves timing and loop; accept_losses must name each reported loss compatible with the request.",
+        ),
+        definition::<InspectAdxInput>(
+            "inspect_adx",
+            true,
+            "Inspect a retained CRI ADX stream: every header field with offsets, loop, end marker, unknown bytes, coefficients, paged blocks and decoded samples with their source nibbles. Encrypted and non-standard encodings refuse with the byte.",
+        ),
+        definition::<RenderAdxInput>(
+            "render_adx",
+            false,
+            "Decode a retained ADX to a PCM16 WAV with its smpl loop, the exact original and a report: the whole stream, a frame range, or loop passes with a re-entry check. The WAV is retained as decoded_source for encode_adx or prepare_sample.",
+        ),
+        definition::<RankAdxLoopsInput>(
+            "rank_adx_loops",
+            true,
+            "Rank 32-frame-aligned ADX loop points of a retained PCM16 WAV by predicted re-entry difference (decoder-history mismatch) and seam continuity. Read-only; pass a chosen candidate to encode_adx and verify its loop_reentry.",
+        ),
+        definition::<EncodeAdxInput>(
+            "encode_adx",
+            false,
+            "Encode a retained PCM16 WAV (render_adx decoded_source or a loaded file) into a new retained ADX with a declared highpass, loop and sector alignment. Reads the result back; accept_changes must name each reported loss.",
+        ),
+        definition::<InspectNdsSoundInput>(
+            "inspect_nds_sound",
+            true,
+            "Inspect retained Nintendo DS sound files (SDAT members, SWAR/SWAV waves, SBNK instruments, STRM streams) with raw offsets, decoded wave readback and located refusals. SSEQ/SSAR are header-only.",
+        ),
+        definition::<ExportNdsSampleInput>(
+            "export_nds_sample",
+            false,
+            "Export one SWAR/SWAV wave or STRM channel: exact original bytes, decoded PCM16 WAV with its loop, optional baked-loop audition and report. The WAV is retained for prepare_sample.",
+        ),
+        definition::<ReplaceNdsWaveInput>(
+            "replace_nds_wave",
+            false,
+            "Write a SWAR copy with one wave replaced from a retained WAV as PCM8, PCM16 or IMA-ADPCM. Moves later blocks, updates offsets and sizes, and verifies decoded and unchanged bytes; losses must be accepted.",
         ),
         definition::<ExportInstrumentBankInput>(
             "export_instrument_bank",
@@ -263,7 +343,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         definition::<ConvertForTargetInput>(
             "convert_for_target",
             false,
-            "Optional Retro Music Converter handoff for newly composed revisions. Requires explicit mappings; refuses imported MIDI and known losses.",
+            "Optional external frame converter handoff for newly composed revisions. Requires explicit mappings; refuses imported MIDI and known losses.",
         ),
         definition::<ImportProjectInput>(
             "import_project",
@@ -333,6 +413,13 @@ pub struct ImportMidiInput {
     pub source: Option<String>,
     #[serde(default)]
     pub brief: Option<ProjectBrief>,
+    /// Explicit end rule for notes never released and zero-length pairs,
+    /// making them editable notes. Omitted, they stay retained without an
+    /// editable note. The rule is kept with the project's source, the
+    /// original bytes stay unchanged, and an edit that changes such a note
+    /// writes and reports its release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_ends: Option<crate::midi::DeclaredEnd>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -436,7 +523,35 @@ pub struct CompareInput {
 #[serde(deny_unknown_fields)]
 pub struct RenderPreviewInput {
     pub job_id: String,
-    pub project: String,
+    /// Choose a project or a retained MIDI source.
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// New workspace folder for source playback (original, float WAV and report).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Source playback of SMF type 2 only, where it is required: the track
+    /// index of the one independent sequence to play on its own clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u32>,
+    /// Source playback only: also keep the WAV and a `source-render-N` record
+    /// for present_review, read_feedback and the bundle of a project imported
+    /// from this source. Exported files are the same either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_for_review: bool,
+    /// Source playback only: output gain in dB (-120.0–12.0) applied to the
+    /// float WAV, such as -3.0 for headroom when the report shows samples
+    /// over full scale. Reported and kept in the source render record; the
+    /// MIDI is not changed. Omitted means no gain stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<crate::mix::Tenths>,
+    /// Source playback only: silence in milliseconds (1–10000) placed before
+    /// the first rendered sample, for listening to material that starts at
+    /// once. Reported and kept in the source render record; marks subtract it
+    /// before mapping to source ticks. Unrelated to excerpt preroll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_in_ms: Option<u32>,
     #[serde(default)]
     pub revision: Option<String>,
     pub layout: RenderLayout,
@@ -451,7 +566,13 @@ pub struct RenderPreviewInput {
 #[serde(deny_unknown_fields)]
 pub struct PresentReviewInput {
     pub job_id: String,
-    pub project: String,
+    /// The project whose renders are shown; omit it when `source` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// A loaded MIDI source whose kept source renders (`source-render-N`) are
+    /// shown instead of project renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Shown to the person, such as `Village BGM · Revised`.
     #[serde(default)]
     pub title: Option<String>,
@@ -465,7 +586,13 @@ pub struct PresentReviewInput {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFeedbackInput {
-    pub project: String,
+    /// Omit it when `source` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// A loaded MIDI source: feedback on its source renders, located on the
+    /// source clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Only feedback delivered after this sequence; use `next_cursor`.
     #[serde(default)]
     pub after_sequence: Option<u64>,
@@ -475,7 +602,12 @@ pub struct ReadFeedbackInput {
 #[serde(deny_unknown_fields)]
 pub struct RecordFeedbackInput {
     pub job_id: String,
-    pub project: String,
+    /// Omit it when `source` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// A loaded MIDI source, for marks on its source renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default)]
     pub presentation: Option<String>,
     #[serde(default)]
@@ -492,11 +624,11 @@ pub struct ConvertForTargetInput {
     pub project: String,
     #[serde(default)]
     pub revision: Option<String>,
-    /// The Retro Music Converter executable (`retro-music-converter`),
+    /// The external frame converter executable,
     /// relative to the workspace or absolute.
     pub converter: String,
     pub mapping: crate::target::TargetMapping,
-    /// Converter capability profile of the target driver, relative to the workspace.
+    /// External converter capability profile of the target driver, relative to the workspace.
     #[serde(default)]
     pub capability_profile: Option<String>,
     /// New folder under `out/` or `work/` in the workspace.
@@ -572,6 +704,12 @@ pub struct ExportProjectInput {
     /// render. Canonical `renders/<id>.wav` files remain for import.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub named_copies: bool,
+    /// Source-backed projects imported with `declared_ends`: write a release
+    /// at the declared end of every such note, including untouched ones, and
+    /// report each in `declared_ends_written`. Default false keeps original
+    /// bytes for notes no edit changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub write_declared_ends: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -647,14 +785,26 @@ impl MissingRenders {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompareMidiInput {
+    /// A MIDI file path relative to the workspace (absolute paths also
+    /// work), or the ID of a source retained with load_midi.
     pub reference: String,
+    /// A MIDI file path relative to the workspace, or a loaded source ID.
     pub candidate: String,
+    /// First difference to return; pass the previous `next_cursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// Differences per page: default 50, maximum 500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoadMidiInput {
     pub job_id: String,
+    /// The MIDI or container file, relative to the workspace (the server's
+    /// --workspace folder, not the shell's directory); absolute paths also
+    /// work.
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,

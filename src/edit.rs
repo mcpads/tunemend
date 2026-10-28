@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio_clips::{AudioClip, ClipUpdate};
 use crate::composition::{
     Composition, ControlKind, ControlLane, ControlPoint, Marker, Note, Playback, Section,
-    TempoChange, TimeSignature, Timebase, Voice, check_composition,
+    StackedNotes, TempoChange, TimeSignature, Timebase, Voice, check_composition_with,
 };
 use crate::diagnostic::{Diagnostic, DiagnosticCode as Code, Report};
 use crate::effects::{Effect, EffectParameter, Processor};
@@ -404,11 +404,23 @@ pub fn apply_edit(
     base: &Composition,
     request: &EditRequest,
 ) -> Result<Composition, Vec<Diagnostic>> {
+    apply_edit_with(timebase, base, request, StackedNotes::Reject)
+}
+
+/// `apply_edit` for a project whose stacked notes come from a MIDI source;
+/// the source writer checks those stacks separately.
+pub(crate) fn apply_edit_with(
+    timebase: Timebase,
+    base: &Composition,
+    request: &EditRequest,
+    stacked: StackedNotes,
+) -> Result<Composition, Vec<Diagnostic>> {
     let result = apply_operations(base, request)?;
     let mut diagnostics = Vec::new();
-    check_composition(
+    check_composition_with(
         timebase,
         &result,
+        stacked,
         &mut Report::new("/result", &mut diagnostics),
     );
     check_edit_bounds(

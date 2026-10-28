@@ -81,7 +81,7 @@ impl Service {
                 .into_owned(),
             derived_from: None,
         };
-        let discovery = discovery_summary(&bytes);
+        let discovery = discovery_summary(&bytes, Some(&record.name));
         let store = self.store_mut(true)?;
         store.put_object(&bytes)?;
         let mut response = ToolResponse::ok(
@@ -131,11 +131,14 @@ impl Service {
                 json!({"source":id,"offset":start,"bytes":&bytes[start..end],"total":bytes.len(),"next_cursor":(end<bytes.len()).then_some(end)}),
             ));
         }
-        let discovery = discovery(&bytes);
+        let name = self
+            .shared_document::<SoundSourceRecord>(SOURCES, id)?
+            .map(|record| record.name);
+        let discovery = discovery(&bytes, name.as_deref());
         match view {
             "summary" => done(ToolResponse::ok(
                 "sound-source discovery",
-                json!({"source":id,"bytes":bytes.len(),"discovery":discovery_summary(&bytes)}),
+                json!({"source":id,"bytes":bytes.len(),"discovery":discovery_summary(&bytes, name.as_deref())}),
             )),
             "modules" | "banks" => {
                 let rows: Vec<Value> = discovery["catalogs"]
@@ -174,14 +177,44 @@ impl Service {
         done(response)
     }
 }
-fn discovery(bytes: &[u8]) -> Value {
+fn discovery(bytes: &[u8], name: Option<&str>) -> Value {
     let catalogs = crate::instrument_source::discover_compile_sources(bytes);
-    let interpretation = if catalogs.is_empty() {
-        "no structural Compile LoROM catalog found; see formats for other interpretations"
-    } else {
+    let mut formats = format_hints(bytes);
+    if formats.is_empty() {
+        formats.extend(body_name_hint(name).or_else(|| packed_dac_name_hint(name, bytes.len())));
+    }
+    // A LoROM image is a whole number of 32 KiB banks, optionally after a
+    // 512-byte copier header.
+    let snes_sized = bytes.len() >= 0x8000 && matches!(bytes.len() % 0x8000, 0 | 512);
+    let interpretation = if !catalogs.is_empty() {
         "structural Compile LoROM candidates; select modules and an explicit layout before copying"
+    } else if !formats.is_empty() {
+        "see formats for the tools that interpret this file"
+    } else if snes_sized {
+        "no structural Compile LoROM catalog found and no other format recognized; every byte is retained"
+    } else {
+        "no format recognized; every byte is retained and tools that take offset and length can read slices of it"
     };
-    json!({"catalogs":catalogs,"interpretation":interpretation,"formats":format_hints(bytes)})
+    json!({"catalogs":catalogs,"interpretation":interpretation,"formats":formats})
+}
+/// A file named like a VAB body: a VB has no header, so its bytes alone do
+/// not identify it.
+fn body_name_hint(name: Option<&str>) -> Option<Value> {
+    let name = name?;
+    name.to_ascii_lowercase().ends_with(".vb").then(|| {
+        json!({"format":"vab_body_candidate","load_with":"load_vab_bank","note":"named like a VAB body (VB); a VB has no header and is not recognized from its bytes. Retain its VH as well and pass both to load_vab_bank as header and body"})
+    })
+}
+/// A file named `.packed4`: headerless, so only its name points at md_dac4,
+/// and the layout, rate and extent still have to be declared.
+fn packed_dac_name_hint(name: Option<&str>, bytes: usize) -> Option<Value> {
+    let name = name?;
+    name.to_ascii_lowercase().ends_with(".packed4").then(|| {
+        json!({"format":"md_dac4_candidate","basis":"file name only; the bytes have no header and are not recognized, so this is not a format identification",
+            "convert_with":"prepare_sample","encoding":"md_dac4","samples_if_whole_file":bytes * 2,
+            "declare":["md_dac.nibble_order (the driver's choice; not in the data)","sample_rate (the driver's write rate; not in the data)","offset and length when the file is not exactly one sample"],
+            "note":"see the md_dac4 section of the sample conversion reference for choosing and reporting these"})
+    })
 }
 /// Container signatures that another tool interprets.
 fn format_hints(bytes: &[u8]) -> Vec<Value> {
@@ -215,16 +248,27 @@ fn format_hints(bytes: &[u8]) -> Vec<Value> {
         vec![
             json!({"format":"vag_variant","magic":String::from_utf8_lossy(&bytes[..4]),"note":"interleaved or byte-reversed VAG is retained but not interpreted; prepare_sample admits only VAGp"}),
         ]
+    } else if bytes.len() >= 4 && bytes[0] == 0x80 && bytes[1] == 0x00 {
+        vec![super::adx::discovery_hint(bytes)]
+    } else if let Some(hint) = crate::nds_sound::discovery_hint(bytes) {
+        vec![hint]
     } else if bytes.starts_with(&[0x1f, 0x8b]) {
         vec![
             json!({"format":"gzip","note":"a VGZ file must be decompressed to .vgm before inspect_vgm"}),
         ]
     } else {
-        vec![]
+        // A container may hold both VAB banks and sequences.
+        [
+            crate::vab::discovery_hint(bytes),
+            crate::psx_seq::discovery_hint(bytes),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
-fn discovery_summary(bytes: &[u8]) -> Value {
-    let mut result = discovery(bytes);
+fn discovery_summary(bytes: &[u8], name: Option<&str>) -> Value {
+    let mut result = discovery(bytes, name);
     for catalog in result["catalogs"].as_array_mut().expect("array") {
         let modules = catalog
             .as_object_mut()

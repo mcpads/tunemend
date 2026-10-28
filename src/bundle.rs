@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::composition::{Composition, Timebase, check_composition};
+use crate::composition::{Composition, StackedNotes, Timebase, check_composition_with};
 use crate::diagnostic::{Diagnostic, DiagnosticCode as Code, Report};
 use crate::edit::{EditRequest, apply_operations, check_edit_bounds};
 use crate::export::{MidiExport, check_midi_export};
-use crate::review::{Feedback, FeedbackState, Presentation, Render, RenderLayout};
+use crate::review::{Feedback, FeedbackState, Presentation, Render, RenderLayout, SourceRender};
 use crate::timeline::{Rational, content_seconds};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -31,6 +31,25 @@ pub struct ProjectBundle {
     /// instruments. The bytes they name travel in the delivery's `objects/`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<ReferencedRecord>,
+    /// Listening on source-only renders of `project.midi_source`. These are
+    /// not project renders and refer to no revision; their WAVs travel in
+    /// the delivery's `source-renders/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_reviews: Option<SourceReviews>,
+}
+
+/// Source renders of one retained MIDI source, their presentations and the
+/// feedback on them, including undelivered drafts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceReviews {
+    /// SHA-256 of the source; equals the project's `midi_source`.
+    pub source: String,
+    pub renders: Vec<SourceRender>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub presentations: Vec<Presentation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<Feedback>,
 }
 
 /// Collections a bundle can carry records of.
@@ -115,7 +134,12 @@ pub fn check_project_bundle(bundle: &ProjectBundle) -> Vec<Diagnostic> {
     }
 
     let revisions = check_revisions(bundle, timebase_valid, &mut report);
-    if timebase_valid && let Some(source) = &bundle.project.midi_source {
+    if timebase_valid && let Some(stored_source) = &bundle.project.midi_source {
+        let mut source = stored_source.clone();
+        if let Some(root) = bundle.revisions.iter().find(|r| r.parent.is_none()) {
+            crate::midi::resolve_declared_projection(&mut source, &root.composition);
+        }
+        let source = &source;
         for (index, revision) in bundle.revisions.iter().enumerate() {
             if let Some((_, true)) = revisions.get(revision.id.as_str())
                 && let Err(problems) =
@@ -125,6 +149,19 @@ pub fn check_project_bundle(bundle: &ProjectBundle) -> Vec<Diagnostic> {
                     report.push(
                         problem.code,
                         format!("revisions/{index}{}", problem.location),
+                        problem.message,
+                    );
+                }
+            }
+            if let (Some(parent), Some(request)) = (&revision.parent, &revision.edit_request)
+                && let Some((base, true)) = revisions.get(parent.as_str())
+                && let Err(problems) =
+                    crate::midi::check_source_bounds(source, base, &revision.composition, request)
+            {
+                for problem in problems {
+                    report.push(
+                        problem.code,
+                        format!("revisions/{index}/edit_request{}", problem.location),
                         problem.message,
                     );
                 }
@@ -305,9 +342,13 @@ pub fn check_project_bundle(bundle: &ProjectBundle) -> Vec<Diagnostic> {
                 "revision",
                 format!("revision `{}` does not exist", export.revision),
             ),
-            Some(&(composition, true)) => {
-                check_midi_export(timebase, composition, export, &mut report)
-            }
+            Some(&(composition, true)) => check_midi_export(
+                timebase,
+                composition,
+                export,
+                bundle.project.midi_source.is_some(),
+                &mut report,
+            ),
             Some(_) => {}
         }
     }
@@ -335,8 +376,143 @@ pub fn check_project_bundle(bundle: &ProjectBundle) -> Vec<Diagnostic> {
             );
         }
     }
+    if let Some(reviews) = &bundle.source_reviews {
+        let mut report = report.nested("source_reviews");
+        check_source_reviews(bundle, reviews, &mut report);
+    }
 
     diagnostics
+}
+
+/// Source reviews belong to the project's own source. Presentations and
+/// marks refer only to its source renders; marks name no voice.
+fn check_source_reviews(bundle: &ProjectBundle, reviews: &SourceReviews, report: &mut Report) {
+    if bundle
+        .project
+        .midi_source
+        .as_ref()
+        .map(|s| s.sha256.as_str())
+        != Some(&reviews.source)
+    {
+        report.push(
+            Code::UnknownReference,
+            "source",
+            "source reviews must belong to the project's retained MIDI source",
+        );
+    }
+    check_unique_ids(
+        reviews.renders.iter().map(|r| r.id.as_str()),
+        "renders",
+        report,
+    );
+    let lengths: HashMap<&str, u64> = reviews
+        .renders
+        .iter()
+        .map(|r| (r.id.as_str(), r.length_samples))
+        .collect();
+    for (i, render) in reviews.renders.iter().enumerate() {
+        if render.source != reviews.source {
+            report.push(
+                Code::UnknownReference,
+                format!("renders/{i}/source"),
+                "a source render must play the reviewed source",
+            );
+        }
+        if render.content_samples > render.length_samples {
+            report.push(
+                Code::InvalidRange,
+                format!("renders/{i}/content_samples"),
+                "content cannot exceed the render length",
+            );
+        }
+    }
+    check_unique_ids(
+        reviews.presentations.iter().map(|p| p.id.as_str()),
+        "presentations",
+        report,
+    );
+    for (i, presentation) in reviews.presentations.iter().enumerate() {
+        if presentation.renders.is_empty() {
+            report.push(
+                Code::InvalidRange,
+                format!("presentations/{i}/renders"),
+                "a presentation shows at least one render",
+            );
+        }
+        for (j, item) in presentation.renders.iter().enumerate() {
+            if !lengths.contains_key(item.render.as_str()) {
+                report.push(
+                    Code::UnknownReference,
+                    format!("presentations/{i}/renders/{j}/render"),
+                    format!("source render `{}` does not exist", item.render),
+                );
+            }
+        }
+    }
+    check_unique_ids(
+        reviews.feedback.iter().map(|f| f.id.as_str()),
+        "feedback",
+        report,
+    );
+    let mut sequences = HashSet::new();
+    for (i, feedback) in reviews.feedback.iter().enumerate() {
+        if let FeedbackState::Delivered { sequence } = feedback.state
+            && !sequences.insert(sequence)
+        {
+            report.push(
+                Code::DuplicateId,
+                format!("feedback/{i}/state/sequence"),
+                format!("delivery sequence {sequence} is used twice"),
+            );
+        }
+        let presentation = match &feedback.presentation {
+            None => None,
+            Some(id) => match reviews.presentations.iter().find(|p| &p.id == id) {
+                Some(presentation) => Some(presentation),
+                None => {
+                    report.push(
+                        Code::UnknownReference,
+                        format!("feedback/{i}/presentation"),
+                        format!("presentation `{id}` does not exist"),
+                    );
+                    continue;
+                }
+            },
+        };
+        for (j, mark) in feedback.marks.iter().enumerate() {
+            let presented = presentation
+                .is_none_or(|p| p.renders.iter().any(|item| item.render == mark.render));
+            let Some(&length) = lengths.get(mark.render.as_str()).filter(|_| presented) else {
+                report.push(
+                    Code::UnknownReference,
+                    format!("feedback/{i}/marks/{j}/render"),
+                    format!(
+                        "source render `{}` does not exist or is not part of the presentation",
+                        mark.render
+                    ),
+                );
+                continue;
+            };
+            if mark.start_sample >= length
+                || mark
+                    .end_sample
+                    .is_some_and(|e| e <= mark.start_sample || e > length)
+            {
+                report.push(
+                    Code::MarkOutsideRender,
+                    format!("feedback/{i}/marks/{j}"),
+                    format!("the render has {length} samples"),
+                );
+            }
+            if mark.voice.is_some() {
+                report.push(
+                    Code::InvalidRange,
+                    format!("feedback/{i}/marks/{j}/voice"),
+                    "source renders have no voices",
+                );
+            }
+        }
+    }
 }
 
 /// Returns each revision's composition and whether it passed its checks.
@@ -365,9 +541,13 @@ fn check_revisions<'a>(
         }
         let mut composition_diagnostics = Vec::new();
         if timebase_valid {
-            check_composition(
+            check_composition_with(
                 bundle.project.timebase,
                 &revision.composition,
+                match bundle.project.midi_source {
+                    Some(_) => StackedNotes::SourcePaired,
+                    None => StackedNotes::Reject,
+                },
                 &mut Report::new("", &mut composition_diagnostics),
             );
         }

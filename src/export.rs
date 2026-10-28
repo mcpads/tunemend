@@ -27,7 +27,12 @@ pub struct MidiExport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MidiTiming {
+    /// Ticks per quarter note, 1..32767: an SMF header division with bit 15
+    /// clear has 15 bits.
+    #[schemars(range(min = 1, max = MAX_PPQ))]
     pub ppq: u16,
+    /// Tempo, 1..16777215: the 24-bit SMF Set Tempo value.
+    #[schemars(range(min = 1, max = MAX_MICROSECONDS_PER_QUARTER))]
     pub microseconds_per_quarter: u32,
 }
 
@@ -46,17 +51,25 @@ impl MidiTiming {
 pub struct VoiceAssignment {
     pub voice: String,
     pub track: String,
-    /// MIDI channel, 0–15.
+    /// MIDI channel as the 0–15 status nibble; messages and voice IDs
+    /// number channels 1–16.
     pub channel: u8,
+    /// Retained receiver identity for a multi-port source; omitted means port 0.
+    /// Single-receiver sources keep their original routing without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u8>,
 }
 
 /// Largest PPQ representable in a metrical SMF header.
 const MAX_PPQ: u16 = 0x7FFF;
 
+/// With `source_backed`, shared channels come from the retained source; the
+/// source writer checks them by readback instead of refusing shared state.
 pub(crate) fn check_midi_export(
     timebase: Timebase,
     composition: &Composition,
     export: &MidiExport,
+    source_backed: bool,
     report: &mut Report,
 ) {
     match (timebase, export.timing) {
@@ -116,6 +129,11 @@ pub(crate) fn check_midi_export(
                 "track name must not be empty",
             );
         }
+        if assignment.port.is_some_and(|port| port > 127)
+            || (!source_backed && assignment.port.is_some())
+        {
+            report.push(Code::ValueOutOfRange, format!("assignments/{i}/port"), "port is a retained source identity in 0–127; new receiver assignments are not supported");
+        }
         if assignment.channel > 15 {
             report.push(
                 Code::ValueOutOfRange,
@@ -141,6 +159,9 @@ pub(crate) fn check_midi_export(
         );
     }
 
+    if source_backed {
+        return;
+    }
     for (channel, voices) in channel_voices.iter().filter(|(_, voices)| voices.len() > 1) {
         if let Some(lane) = composition
             .control_lanes
@@ -150,7 +171,7 @@ pub(crate) fn check_midi_export(
             report.push(
                 Code::SharedChannelControl,
                 "assignments",
-                format!("channel {channel} is shared by {voices:?}, so the {:?} lane of `{}` would affect all of them", lane.kind, lane.voice),
+                format!("MIDI channel {} (assignment channel {channel}) is shared by {voices:?}, so the {:?} lane of `{}` would affect all of them", channel + 1, lane.kind, lane.voice),
             );
         }
         let mut by_pitch: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
@@ -167,7 +188,10 @@ pub(crate) fn check_midi_export(
                 &composition.notes,
                 indices,
                 report,
-                &format!("MIDI channel {channel}"),
+                &format!(
+                    "MIDI channel {} (assignment channel {channel})",
+                    channel + 1
+                ),
             );
         }
     }

@@ -376,7 +376,17 @@ impl InstrumentBank {
                     }
                     let start = old.start;
                     let end = start + source.bytes.len();
-                    let at = self.file_offset("bank.bin", start, source.bytes.len())?;
+                    // Only the variable bank module is rewritten; resident and
+                    // other sample modules are shared context.
+                    let at = self
+                        .file_offset("bank.bin", start, source.bytes.len())
+                        .map_err(|_| {
+                            format!(
+                                "slot {slot}'s sample at ARAM {start:#06x} lies outside the bank module (in a resident or other sample module shared with other banks); replace only a slot stored in the bank module ({:#06x}..{:#06x}) or use append",
+                                self.bank_block.address,
+                                self.bank_block.address + self.bank_block.length
+                            )
+                        })?;
                     if overlaps(
                         start,
                         source.bytes.len(),

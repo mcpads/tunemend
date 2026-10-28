@@ -1,9 +1,9 @@
-//! Hand-off to Retro Music Converter for a sound chip target.
+//! Hand-off to external frame converter for a sound chip target.
 //!
-//! The adapter turns a revision into the Converter's note timeline with an
-//! explicit voice → chip, patch and pan mapping, then runs the Converter as a
+//! The adapter turns a revision into the converter's note timeline with an
+//! explicit voice → chip, patch and pan mapping, then runs the converter as a
 //! separate process. Chip meaning, frame conversion and rendering stay owned
-//! by the Converter; everything MIDI-level that does not carry over is
+//! by the converter; everything MIDI-level that does not carry over is
 //! reported as a loss.
 
 use std::collections::BTreeMap;
@@ -26,7 +26,7 @@ pub struct TargetMapping {
     /// Driver update rate in frames per second, such as 60.
     pub frames_per_second: u32,
     pub voices: Vec<ChipVoice>,
-    /// Converter `frame_patch` objects by patch name.
+    /// External converter `frame_patch` objects by patch name.
     pub patches: BTreeMap<String, Value>,
     /// Voices left out on purpose; each is reported as a loss.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -41,12 +41,12 @@ pub struct TargetMapping {
 #[serde(deny_unknown_fields)]
 pub struct ChipVoice {
     pub voice: String,
-    /// Converter chip name, such as `ym2612` or `sn76489`.
+    /// External converter chip name, such as `ym2612` or `sn76489`.
     pub chip: String,
     pub patch: String,
-    /// Converter pan value; YM2612 uses 64, 128 or 192.
+    /// External converter pan value; YM2612 uses 64, 128 or 192.
     pub pan: u8,
-    /// Converter role label; defaults to the voice's role or id.
+    /// External converter role label; defaults to the voice's role or id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 }
@@ -58,7 +58,7 @@ pub struct TargetTimeline {
     pub losses: Vec<Value>,
 }
 
-/// Builds the Converter timeline. Blocks instead of guessing when a voice is
+/// Builds the converter timeline. Blocks instead of guessing when a voice is
 /// unmapped, a note is off the frame grid without `quantize`, or a mapped
 /// voice plays two notes at once.
 pub fn build_timeline(
@@ -335,17 +335,17 @@ fn rational_text(value: Rational) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct StepResult {
     pub step: String,
-    /// 0 success, 2 refused by the Converter's checks, other values are failures.
+    /// 0 success, 2 refused by the converter's checks, other values are failures.
     pub exit_code: i32,
     pub output: String,
     pub stderr: String,
-    /// The `reason` the Converter wrote into the step's report when it refused.
+    /// The `reason` the converter wrote into the step's report when it refused.
     pub reason: Option<String>,
 }
 
-/// Runs the Converter executable: frame conversion, then capability check,
+/// Runs the converter executable: frame conversion, then capability check,
 /// render and MIDI export of the frames. `destination` must be a new folder
-/// under the workspace's `out/` or `work/`, which the Converter requires.
+/// under the workspace's `out/` or `work/`, which the converter requires.
 pub fn run_converter(
     workspace: &Path,
     converter: &Path,
@@ -423,7 +423,7 @@ pub fn run_converter(
     Ok(steps)
 }
 
-/// The Git checkout the Converter executable was built in, if any: its
+/// The Git checkout the converter executable was built in, if any: its
 /// commit and whether the working tree had uncommitted changes.
 pub fn converter_revision(converter: &Path) -> Option<Value> {
     let git = |args: &[&str]| -> Option<String> {

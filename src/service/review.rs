@@ -10,6 +10,194 @@ pub(super) type RevisionAudio = (
 );
 
 impl Service {
+    fn render_source_preview(&mut self, input: RenderPreviewInput) -> Handled {
+        if input.project.is_some() || input.revision.is_some() || input.voices.is_some() {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/source",
+                "source playback cannot select a project, revision or voices; it plays the retained channel stream",
+            ));
+        }
+        let Some(destination) = &input.destination else {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/destination",
+                "source playback requires a new destination folder",
+            ));
+        };
+        let source = input.source.as_deref().expect("source branch");
+        let bytes = self.midi_source_bytes(source)?;
+        let sequence = input.sequence.map(|s| s as usize);
+        let sequences = crate::render::type_2_sequences(&bytes);
+        let selection_problem = match (sequences, sequence) {
+            (Some(count), None) => Some(format!(
+                "this SMF type 2 file holds {count} independent sequences; choose one with sequence (0–{})",
+                count.saturating_sub(1)
+            )),
+            (Some(count), Some(selected)) if selected >= count => Some(format!(
+                "sequence {selected} does not exist; this type 2 file holds {count} sequences"
+            )),
+            (None, Some(_)) => Some(
+                "only SMF type 2 holds independent sequences; omit sequence for type 0/1 and RMID"
+                    .into(),
+            ),
+            _ => None,
+        };
+        if let Some(problem) = selection_problem {
+            return done(ToolResponse::refused(
+                Code::InvalidRange,
+                "/sequence",
+                problem,
+            ));
+        }
+        if let Some(gain) = input.gain_db
+            && !(crate::mix::MIN_GAIN_DB..=crate::mix::MAX_GAIN_DB).contains(&gain.value())
+        {
+            return done(ToolResponse::refused(
+                Code::ValueOutOfRange,
+                "/gain_db",
+                "gain_db must be -120.0–12.0",
+            ));
+        }
+        if input
+            .lead_in_ms
+            .is_some_and(|ms| !(1..=10_000).contains(&ms))
+        {
+            return done(ToolResponse::refused(
+                Code::ValueOutOfRange,
+                "/lead_in_ms",
+                "lead_in_ms must be 1–10000",
+            ));
+        }
+        let mut rendered = match crate::render::render_midi_sequence(
+            &bytes,
+            sequence,
+            &input.layout,
+            &reference_soundfont(),
+            input.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE),
+        ) {
+            Ok(rendered) => rendered,
+            Err(crate::render::RenderError::MidiEvents(diagnostics)) => {
+                return done(ToolResponse::blocked(
+                    "source playback cannot interpret these events",
+                    diagnostics,
+                ));
+            }
+            Err(error) => {
+                return done(ToolResponse::refused(
+                    Code::UnsupportedMidi,
+                    "/source",
+                    error.to_string(),
+                ));
+            }
+        };
+        let peak_before_gain = input
+            .gain_db
+            .map(|gain| source_review::apply_gain(&mut rendered.audio, gain));
+        let lead_in = input.lead_in_ms.map(|ms| {
+            let samples = source_review::lead_in_samples(ms, rendered.audio.sample_rate);
+            source_review::prepend_silence(&mut rendered.audio, samples);
+            (ms, samples)
+        });
+        let audio = &rendered.audio;
+        let peak = audio
+            .left
+            .iter()
+            .chain(&audio.right)
+            .fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let over_full_scale = audio
+            .left
+            .iter()
+            .chain(&audio.right)
+            .filter(|v| v.abs() > 1.0)
+            .count();
+        let mut report = json!({
+            "source": source, "source_sha256": sha256_hex(&bytes), "layout": input.layout,
+            "sample_rate": audio.sample_rate, "content_samples": audio.content_samples,
+            "length_samples": audio.left.len(), "tail_truncated": audio.tail_truncated,
+            "format": "float32", "sample_peak": peak, "samples_over_full_scale": over_full_scale,
+            "clamped_samples": 0, "sound_source": REFERENCE_SOUND_SOURCE,
+            "playback": "single MIDI receiver; equal-tick events in track order; stacked key releases end the earliest held instance of that channel and key; excerpt preroll from zero",
+            "transport_end": "release held notes and pedals at the selected end; decay up to 3 seconds",
+            "source_modified": false, "editable_projection_required": false,
+            "files": {"original": "original.bin", "audio": "preview.wav", "report": "render.json"}
+        });
+        // A single-receiver type 0/1 report keeps its earlier form and bytes.
+        if rendered.receivers.len() > 1 {
+            report["playback"] = json!(
+                "independent MIDI receivers, one per port (port 0 before a track's first port event); each keeps its own channel, program, controller, pedal and note state; outputs sum in port order; equal-tick events in track order; stacked key releases end the earliest held instance of that channel and key on that receiver; excerpt preroll from zero"
+            );
+            report["transport_end"] = json!(
+                "release held notes and pedals on every receiver at the selected end; decay of the sum up to 3 seconds"
+            );
+        }
+        if rendered.receivers.len() > 1 || sequence.is_some() {
+            report["receivers"] = json!(rendered.receivers);
+        }
+        if let Some(sequence) = sequence {
+            report["sequence"] = json!({"index": sequence, "count": sequences,
+                "clock": "this sequence's own tempo events from its tick 0; other sequences are not played or merged"});
+        }
+        if let (Some(gain), Some(before)) = (input.gain_db, peak_before_gain) {
+            report["gain_db"] = json!(gain);
+            report["sample_peak_before_gain"] = json!(before);
+            report["gain"] = json!(
+                "applied to every float sample after rendering and the tail check; the MIDI and its playback are unchanged"
+            );
+        }
+        if let Some((ms, samples)) = lead_in {
+            report["lead_in_ms"] = json!(ms);
+            report["lead_in_samples"] = json!(samples);
+            report["lead_in"] = json!(
+                "silence placed before the first rendered sample; length_samples includes it and content_samples does not. Marks subtract it before mapping to source ticks; the MIDI is unchanged"
+            );
+        }
+        let headroom = (over_full_scale > 0).then(|| json!({
+            "samples_over_full_scale": over_full_scale, "sample_peak": peak,
+            "suggested_gain_db": source_review::gain_for_peak(peak, input.gain_db),
+            "note": "players, browsers and integer conversion clip samples above full scale; render again with gain_db at or below the suggestion (another job_id) to hear the original without clipping. The MIDI is not changed"}));
+        let wav = crate::render::wav_bytes_in(
+            audio.sample_rate,
+            &audio.left,
+            &audio.right,
+            crate::review::WavFormat::Float32,
+        );
+        let kept = input.keep_for_review.then(|| wav.clone());
+        let mut response = self.export_sound_files(
+            &input.job_id,
+            destination,
+            vec![
+                ("original.bin".into(), bytes),
+                ("preview.wav".into(), wav),
+                (
+                    "render.json".into(),
+                    serde_json::to_vec_pretty(&report).expect("serializes"),
+                ),
+            ],
+        )?;
+        response.summary =
+            "rendered retained MIDI events; original bytes and unclamped float WAV exported".into();
+        response.result["render"] = report;
+        if let Some(headroom) = headroom {
+            response.result["headroom"] = headroom;
+        }
+        let Some(wav) = kept else {
+            return done(response);
+        };
+        let mut record =
+            self.keep_source_render(source, sequence, input.layout, &rendered, &wav)?;
+        record.gain_db = input.gain_db;
+        record.lead_in_samples = lead_in.map(|(_, samples)| samples);
+        response.summary = format!("{}; kept as {} for listening", response.summary, record.id);
+        response.result["source_render"] = json!(record);
+        response.result["review"] = json!(
+            "present_review with this source and render ID; marks map back to source ticks and retained event IDs, not to a revision"
+        );
+        let owner = source_review::source_owner(source);
+        commit(response, move |writer| {
+            writer.put_document(&owner, source_review::SOURCE_RENDERS, &record.id, &record)
+        })
+    }
     /// Listener addresses belong to this process, not to the stored job result.
     pub(super) fn refresh_review_url(&self, response: &mut ToolResponse, project: &str) {
         let Some(id) = response
@@ -54,10 +242,16 @@ impl Service {
                 assignments: imported.assignments,
                 sections_as_markers: false,
             };
-            let bytes = crate::midi::write_preserving(source, info.timebase, composition, &plan)
-                .map_err(|d| {
-                    ToolResponse::blocked("the revision cannot be preserved for preview", d)
-                })?;
+            let bytes = crate::midi::write_preserving_declared(
+                source,
+                info.timebase,
+                composition,
+                &plan,
+                true,
+            )
+            .map_err(|d| {
+                ToolResponse::blocked("the revision cannot be preserved for preview", d)
+            })?;
             let blockers = crate::midi::preview_blockers(&bytes);
             if !blockers.is_empty() {
                 return Err(ToolResponse::blocked(
@@ -111,7 +305,52 @@ impl Service {
         Ok((audio, chip_reports, instruments))
     }
     pub(super) fn render_preview(&mut self, input: RenderPreviewInput) -> Handled {
-        let (info, revision) = self.revision(&input.project, input.revision.as_deref())?;
+        if input.source.is_some() {
+            return self.render_source_preview(input);
+        }
+        if input.sequence.is_some() {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/sequence",
+                "sequence selects a type 2 sequence of a retained MIDI source; project renders have none",
+            ));
+        }
+        if input.lead_in_ms.is_some() {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/lead_in_ms",
+                "lead_in_ms adds silence before a source render; project renders follow the composition's own timeline",
+            ));
+        }
+        if input.gain_db.is_some() {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/gain_db",
+                "gain_db is the source playback output gain; project renders take headroom from the mixer's master_volume_db",
+            ));
+        }
+        if input.keep_for_review {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/keep_for_review",
+                "project renders are always kept; keep_for_review applies to source playback",
+            ));
+        }
+        let Some(project) = input.project.as_deref() else {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/project",
+                "choose a project or source",
+            ));
+        };
+        if input.destination.is_some() {
+            return done(ToolResponse::refused(
+                Code::InvalidRenderLayout,
+                "/destination",
+                "destination is only used for source playback; export_project delivers project renders",
+            ));
+        }
+        let (info, revision) = self.revision(project, input.revision.as_deref())?;
         let composition = &revision.composition;
         if let Some(problem) = layout_problem(composition, &input.layout) {
             return done(ToolResponse::refused(
@@ -142,10 +381,7 @@ impl Service {
         let wav = wav_bytes(&audio);
         let store = self.store_ref()?;
         let object = store.put_object(&wav)?;
-        let id = format!(
-            "render-{}",
-            next_render_number(&store.reader(), &input.project)?
-        );
+        let id = format!("render-{}", next_render_number(&store.reader(), project)?);
         let render = Render {
             id: id.clone(),
             revision: revision.id.clone(),
@@ -172,32 +408,30 @@ impl Service {
         let mut timing = json!({"content_seconds": rational_seconds(content), "total_seconds": total_seconds,
             "tail_seconds": total_seconds - rational_seconds(content), "tail_truncated": audio.tail_truncated,
             "max_tail_seconds": MAX_TAIL_SECONDS});
-        if let (RenderLayout::Full { loop_passes }, Some(loop_start)) =
-            (input.layout, composition.playback.loop_start)
-        {
-            let intro = seconds_at(
-                info.timebase,
-                composition,
-                Rational::from_integer(loop_start.into()),
-            );
-            let end = seconds_at(
-                info.timebase,
-                composition,
-                Rational::from_integer(composition.playback.end.into()),
-            );
-            timing["intro_seconds"] = json!(rational_seconds(intro));
-            timing["loop_seconds"] = json!(rational_seconds(end - intro));
-            timing["loop_passes"] = json!(loop_passes);
-        }
+        add_loop_timing(&mut timing, info.timebase, composition, &input.layout);
         let path = store.object_path(&object);
-        let mut response = ToolResponse::ok(
-            format!(
-                "{id}: {} of {} ({total_seconds:.2} s)",
-                layout_label(&input.layout),
-                revision.id
-            ),
-            json!({"render": render, "timing": timing, "limits": render_limits(!instruments.is_empty(), !composition.mix.clips.is_empty())}),
+        let levels =
+            super::batch::render_levels(&audio.left, &audio.right, crate::review::WavFormat::Pcm16);
+        let warning =
+            super::batch::level_warning(&levels, crate::review::WavFormat::Pcm16, "/levels");
+        let mut summary = format!(
+            "{id}: {} of {} ({total_seconds:.2} s)",
+            layout_label(&input.layout),
+            revision.id
         );
+        if warning.is_some() {
+            summary.push_str(&format!(
+                "; {} samples clamped by 16-bit encoding (see warnings)",
+                levels["clamped_samples"]
+            ));
+        }
+        let mut response = ToolResponse::ok(
+            summary,
+            json!({"render": render, "timing": timing, "levels": levels, "limits": render_limits(!instruments.is_empty(), !composition.mix.clips.is_empty())}),
+        );
+        if let Some(warning) = warning {
+            response.result["warnings"] = json!([warning]);
+        }
         if !composition.mix.is_empty() {
             response.result["mix"] = json!({"applied": true, "voices_heard": composition.voices.iter()
                 .filter(|v| record.render.voices.as_ref().is_none_or(|selected| selected.contains(&v.id)) && composition.mix.audible(&v.id))
@@ -236,13 +470,13 @@ impl Service {
             path: path.display().to_string(),
             sha256: object,
         });
-        let project = input.project;
+        let project = input.project.expect("checked project");
         commit(response, move |writer| {
             writer.put_document(&project, "render", &id, &record)
         })
     }
     pub(super) fn present_review(&mut self, input: PresentReviewInput) -> Handled {
-        self.project(&input.project)?;
+        let owner = self.review_owner(input.project.as_deref(), input.source.as_deref())?;
         if input.renders.is_empty() {
             return done(ToolResponse::refused(
                 Code::InvalidRange,
@@ -250,28 +484,56 @@ impl Service {
                 "present at least one render",
             ));
         }
-        let store = self.store_ref()?;
-        let reader = store.reader();
+        let mut warnings = Vec::new();
         for (i, item) in input.renders.iter().enumerate() {
-            match reader.document::<RenderRecord>(&input.project, "render", &item.render)? {
+            let location = format!("/renders/{i}/render");
+            match self.listened_render(&owner, &item.render)? {
                 None => {
                     return done(ToolResponse::refused(
                         Code::UnknownReference,
-                        &format!("/renders/{i}/render"),
-                        format!("render `{}` does not exist", item.render),
+                        &location,
+                        match source_review::reviewed_source(&owner) {
+                            Some(_) => format!(
+                                "source render `{}` does not exist; render_preview with keep_for_review keeps one",
+                                item.render
+                            ),
+                            None => format!("render `{}` does not exist", item.render),
+                        },
                     ));
                 }
-                Some(record) if !record.audio_present(store) => {
-                    return done(absent_render_audio(
-                        &input.project,
-                        &item.render,
-                        &format!("/renders/{i}/render"),
-                    ));
+                Some(render) if !self.store_ref()?.object_path(&render.object).is_file() => {
+                    return done(match render.source {
+                        Some(_) => ToolResponse::refused(
+                            Code::MissingRenderAudio,
+                            &location,
+                            format!(
+                                "source render `{}` was imported without audio; import the delivery again with missing_renders=regenerate",
+                                item.render
+                            ),
+                        ),
+                        None => absent_render_audio(&owner, &item.render, &location),
+                    });
                 }
-                Some(_) => {}
+                Some(render) => {
+                    let path = self.store_ref()?.object_path(&render.object);
+                    if let Some(mut warning) = std::fs::read(path)
+                        .ok()
+                        .and_then(|wav| source_review::full_scale_use(&wav))
+                    {
+                        warning["render"] = json!(item.render);
+                        warning["remedy"] = json!(match render.source {
+                            Some(_) =>
+                                "render the source again with gain_db for headroom and present that render",
+                            None =>
+                                "lower master_volume_db (or the loud voices) in a new revision and render again",
+                        });
+                        warnings.push(warning);
+                    }
+                }
             }
         }
-        let presentations: Vec<Presentation> = reader.documents(&input.project, "presentation")?;
+        let reader = self.store_ref()?.reader();
+        let presentations: Vec<Presentation> = reader.documents(&owner, "presentation")?;
         let latest = presentations.last().map(|p| p.id.clone());
         if let Some(expected) = &input.replaces
             && latest.as_ref() != Some(expected)
@@ -289,7 +551,7 @@ impl Service {
             renders: input.renders,
         };
         let stored = presentation.clone();
-        let project = input.project.clone();
+        let project = owner;
         let mut response = ToolResponse::ok(
             "presentation stored",
             json!({
@@ -297,6 +559,9 @@ impl Service {
                 "guidance_for_person": "Listen, mark moments or ranges that sound wrong, then choose Send to AI. Comments are optional.",
             }),
         );
+        if !warnings.is_empty() {
+            response.result["warnings"] = json!(warnings);
+        }
         self.refresh_review_url(&mut response, &project);
         commit(response, move |writer| {
             writer.put_document(&project, "presentation", &stored.id, &stored)
@@ -306,12 +571,29 @@ impl Service {
         &mut self,
         input: ReadFeedbackInput,
     ) -> Result<ToolResponse, ToolResponse> {
-        let (info, _) = self.project(&input.project)?;
+        let owner = self.review_owner(input.project.as_deref(), input.source.as_deref())?;
+        let source_bytes = match source_review::reviewed_source(&owner) {
+            Some(source) => Some(self.midi_source_bytes(source)?),
+            None => None,
+        };
+        let (timebase, held) = match source_bytes {
+            Some(_) => (Timebase::Effect, vec![]),
+            None => {
+                let info = self.project(&owner)?.0;
+                // Retained never-released notes sound in project renders too.
+                let held = match &info.midi_source {
+                    Some(source) => crate::midi::held_retained_notes(source)
+                        .map_err(|d| ToolResponse::blocked("invalid preserved MIDI", d))?,
+                    None => vec![],
+                };
+                (info.timebase, held)
+            }
+        };
         let store = self.store_ref()?;
         let reader = store.reader();
         let after = input.after_sequence.unwrap_or(0);
-        let delivered: Vec<Feedback> = reader.documents(&input.project, "feedback")?;
-        let presentations: Vec<Presentation> = reader.documents(&input.project, "presentation")?;
+        let delivered: Vec<Feedback> = reader.documents(&owner, "feedback")?;
+        let presentations: Vec<Presentation> = reader.documents(&owner, "presentation")?;
         let mut items = Vec::new();
         let mut cursor = after;
         for feedback in delivered {
@@ -324,46 +606,68 @@ impl Service {
             cursor = cursor.max(sequence);
             let mut marks = Vec::new();
             for mark in &feedback.marks {
-                let Some(record) =
-                    reader.document::<RenderRecord>(&input.project, "render", &mark.render)?
-                else {
-                    continue;
-                };
-                let Some(revision) = reader.revision(&input.project, &record.render.revision)?
-                else {
-                    continue;
-                };
                 let label = feedback
                     .presentation
                     .as_ref()
                     .and_then(|p| presentations.iter().find(|x| &x.id == p))
                     .and_then(|p| p.renders.iter().find(|r| r.render == mark.render))
                     .map(|r| r.label.clone());
+                if let Some(bytes) = &source_bytes {
+                    let Some(render) = reader.document::<crate::review::SourceRender>(
+                        &owner,
+                        source_review::SOURCE_RENDERS,
+                        &mark.render,
+                    )?
+                    else {
+                        continue;
+                    };
+                    marks.push(json!({
+                        "render": mark.render, "mark": mark.label, "render_label": label,
+                        "source": render.source, "sequence": render.sequence,
+                        "start": source_review::locate_mark(bytes, &render, mark.start_sample),
+                        "end": mark.end_sample.map(|s| source_review::locate_mark(bytes, &render, s)),
+                    }));
+                    continue;
+                }
+                let Some(record) =
+                    reader.document::<RenderRecord>(&owner, "render", &mark.render)?
+                else {
+                    continue;
+                };
+                let Some(revision) = reader.revision(&owner, &record.render.revision)? else {
+                    continue;
+                };
                 marks.push(json!({
                     "render": mark.render, "mark": mark.label, "render_label": label, "revision": revision.id, "voice": mark.voice,
-                    "start": resolve_sample(info.timebase, &revision.composition, &record.render, mark.start_sample),
-                    "end": mark.end_sample.map(|s| resolve_sample(info.timebase, &revision.composition, &record.render, s)),
+                    "start": resolve_sample(timebase, &revision.composition, &held, &record.render, mark.start_sample),
+                    "end": mark.end_sample.map(|s| resolve_sample(timebase, &revision.composition, &held, &record.render, s)),
                 }));
             }
             items.push(json!({"feedback": feedback.id, "sequence": sequence, "presentation": feedback.presentation,
                 "text": feedback.text, "marks": marks}));
         }
-        let drafts: Vec<Feedback> = reader.documents(&input.project, DRAFTS)?;
+        let drafts: Vec<Feedback> = reader.documents(&owner, DRAFTS)?;
         let pending = drafts
             .iter()
             .filter(|d| !d.marks.is_empty() || d.text.as_deref().is_some_and(|t| !t.is_empty()))
             .count();
-        Ok(ToolResponse::ok(
+        let mut response = ToolResponse::ok(
             format!(
                 "{} new feedback; {pending} undelivered drafts on the screen",
                 items.len()
             ),
             json!({"feedback": items, "next_cursor": cursor, "undelivered_drafts": pending,
                 "note": "Marks are observations, not edit permissions or approval. A mark in a later loop pass is about that pass."}),
-        ))
+        );
+        if source_bytes.is_some() {
+            response.result["note"] = json!(
+                "Marks are observations, not edit permissions or approval. Source marks name source ticks and retained events held on each receiver (inspect_midi IDs), never a revision or voice; relating them to a project revision is your interpretation through the shared source tick."
+            );
+        }
+        Ok(response)
     }
     pub(super) fn record_feedback(&mut self, input: RecordFeedbackInput) -> Handled {
-        self.project(&input.project)?;
+        let owner = self.review_owner(input.project.as_deref(), input.source.as_deref())?;
         let feedback = Feedback {
             id: String::new(),
             presentation: input.presentation,
@@ -371,7 +675,7 @@ impl Service {
             marks: input.marks,
             text: input.text,
         };
-        self.deliver(&input.project, feedback)
+        self.deliver(&owner, feedback)
     }
     /// Freezes feedback as the next delivery after checking its references.
     pub(super) fn deliver(&mut self, project: &str, mut feedback: Feedback) -> Handled {
@@ -382,11 +686,10 @@ impl Service {
                 "there is nothing to deliver yet",
             ));
         }
-        let store = self.store_ref()?;
-        let reader = store.reader();
         let presentation = match &feedback.presentation {
             Some(id) => Some(
-                reader
+                self.store_ref()?
+                    .reader()
                     .document::<Presentation>(project, "presentation", id)?
                     .ok_or_else(|| {
                         ToolResponse::refused(
@@ -399,14 +702,20 @@ impl Service {
             None => None,
         };
         for (i, mark) in feedback.marks.iter().enumerate() {
-            let Some(record) = reader.document::<RenderRecord>(project, "render", &mark.render)?
-            else {
+            let Some(record) = self.listened_render(project, &mark.render)? else {
                 return done(ToolResponse::refused(
                     Code::UnknownReference,
                     &format!("/marks/{i}/render"),
                     format!("render `{}` does not exist", mark.render),
                 ));
             };
+            if record.source.is_some() && mark.voice.is_some() {
+                return done(ToolResponse::refused(
+                    Code::InvalidRange,
+                    &format!("/marks/{i}/voice"),
+                    "source renders have no voices; describe the part in text instead",
+                ));
+            }
             if presentation
                 .as_ref()
                 .is_some_and(|p| !p.renders.iter().any(|r| r.render == mark.render))
@@ -417,7 +726,7 @@ impl Service {
                     "the render is not part of the presentation",
                 ));
             }
-            let length = record.render.length_samples;
+            let length = record.length_samples;
             if mark.start_sample >= length
                 || mark
                     .end_sample
@@ -426,11 +735,15 @@ impl Service {
                 return done(ToolResponse::refused(
                     Code::MarkOutsideRender,
                     &format!("/marks/{i}"),
-                    format!("the render has {length} samples"),
+                    format!(
+                        "the render has {length} samples ({:.3} s at {} Hz); a mark must lie within it. Do not move or clamp it: record the words without this mark and ask the person to mark the spot again",
+                        length as f64 / f64::from(record.sample_rate),
+                        record.sample_rate
+                    ),
                 ));
             }
         }
-        let delivered: Vec<Feedback> = reader.documents(project, "feedback")?;
+        let delivered: Vec<Feedback> = self.store_ref()?.reader().documents(project, "feedback")?;
         let sequence = delivered.len() as u64 + 1;
         feedback.id = format!("feedback-{sequence}");
         feedback.state = FeedbackState::Delivered { sequence };
@@ -452,7 +765,7 @@ impl Service {
         text: Option<String>,
     ) -> ToolResponse {
         let result: Result<ToolResponse, ToolResponse> = (|| {
-            self.project(project)?;
+            self.check_review_owner(project)?;
             let store = self.store_ref()?;
             if store
                 .reader()
@@ -536,6 +849,9 @@ impl Service {
         project: &str,
         presentation: &str,
     ) -> Result<Value, ToolResponse> {
+        if source_review::reviewed_source(project).is_some() {
+            return self.source_review_page(project, presentation);
+        }
         let (info, _) = self.project(project)?;
         let store = self.store_ref()?;
         let reader = store.reader();
@@ -619,6 +935,33 @@ pub(super) fn render_limits(instruments: bool, clips: bool) -> &'static str {
     }
 }
 
+/// Adds the intro and loop lengths to a full render's timing when the
+/// revision loops.
+pub(super) fn add_loop_timing(
+    timing: &mut Value,
+    timebase: Timebase,
+    composition: &Composition,
+    layout: &RenderLayout,
+) {
+    if let (RenderLayout::Full { loop_passes }, Some(loop_start)) =
+        (layout, composition.playback.loop_start)
+    {
+        let intro = seconds_at(
+            timebase,
+            composition,
+            Rational::from_integer(loop_start.into()),
+        );
+        let end = seconds_at(
+            timebase,
+            composition,
+            Rational::from_integer(composition.playback.end.into()),
+        );
+        timing["intro_seconds"] = json!(rational_seconds(intro));
+        timing["loop_seconds"] = json!(rational_seconds(end - intro));
+        timing["loop_passes"] = json!(loop_passes);
+    }
+}
+
 pub(super) fn layout_label(layout: &RenderLayout) -> String {
     match layout {
         RenderLayout::Full { loop_passes: 1 } => "whole piece".into(),
@@ -630,6 +973,7 @@ pub(super) fn layout_label(layout: &RenderLayout) -> String {
 pub(super) fn resolve_sample(
     timebase: Timebase,
     composition: &Composition,
+    held: &[crate::midi::HeldRetainedNote],
     render: &Render,
     sample: u64,
 ) -> Value {
@@ -648,7 +992,7 @@ pub(super) fn resolve_sample(
             "render_seconds": rational_seconds(render_seconds),
             "in_tail": true,
             "seconds_after_content": rational_seconds(seconds_after_content),
-            "sounding_at_end": sounding(composition, composition.playback.end.saturating_sub(1), shown),
+            "sounding_at_end": sounding(composition, held, composition.playback.end.saturating_sub(1), shown),
         }),
         RenderPosition::Content {
             source_position,
@@ -662,24 +1006,33 @@ pub(super) fn resolve_sample(
                 "source_seconds": rational_seconds(source_seconds),
                 "position": position_label(timebase, composition, source_position),
                 "loop_pass": loop_pass,
-                "sounding": sounding(composition, at, shown),
+                "sounding": sounding(composition, held, at, shown),
             })
         }
     }
 }
 
+/// Notes sounding at `at`, then retained never-released source notes, which
+/// have no note id and sound until the content end releases them.
 pub(super) fn sounding(
     composition: &Composition,
+    held: &[crate::midi::HeldRetainedNote],
     at: u64,
     voices: Option<&[String]>,
 ) -> Vec<Value> {
-    composition
+    let notes = composition
         .notes
         .iter()
         .filter(|n| n.start <= at && at < n.start + n.duration)
         .filter(|n| voices.is_none_or(|v| v.contains(&n.voice)))
-        .map(|n: &Note| json!({"id": n.id, "voice": n.voice, "pitch": n.pitch, "start": n.start, "duration": n.duration}))
-        .collect()
+        .map(|n: &Note| json!({"id": n.id, "voice": n.voice, "pitch": n.pitch, "start": n.start, "duration": n.duration}));
+    let retained = held
+        .iter()
+        .filter(|h| h.start <= at && at < composition.playback.end)
+        .filter(|h| voices.is_none_or(|v| v.contains(&h.voice)))
+        .map(|h| json!({"source_event": h.source_event, "voice": h.voice, "pitch": h.pitch, "start": h.start,
+            "retained": "never_released", "sounds_until": "content end"}));
+    notes.chain(retained).collect()
 }
 
 /// What played besides the reference synthesizer: the instruments of heard

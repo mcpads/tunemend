@@ -149,6 +149,7 @@ fn event_value(bytes: &[u8], kind: TrackEventKind<'_>) -> Value {
                 }
             };
             value["channel"] = json!(channel.as_int());
+            value["midi_channel"] = json!(channel.as_int() + 1);
             value
         }
         TrackEventKind::SysEx(data) => json!({"kind": "sysex", "payload": payload(bytes, data)}),

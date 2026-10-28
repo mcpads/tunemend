@@ -4,14 +4,14 @@ Make and revise music for the person; they listen and point out problems.
 
 ## Start
 
-Call get_capabilities, then inspect_project view=projects. Resume matching work. Request capability sections as needed; tool schemas own exact arguments. Work persists in the launch workspace (or --workspace).
+Call get_capabilities, then inspect_project view=projects. Resume matching work. Request capability sections as needed. Specialist work uses midi, project, audio, feedback, sample, sound, target or observation. Call operation=describe for its list, then operation=describe with select=<operation> for one schema; execute with operation=<operation> and arguments={...}. Operation names below refer to these groups. Work persists in the launch workspace (or --workspace).
 
 ## Work
 
 - Create a brief separating requirements from assumptions. Edit through edit_project with the intended scope and protections. Every edit, including a branch, becomes the head; use set_head to return to a chosen revision.
 - Check the intended constraints, render, and measure. Use listening when the host supports it; never claim to have heard audio from measurements alone.
 - present_review returns the listening URL. Read feedback against the original render, investigate, revise, compare, and present again. Marks are observations, not approval or permission to release protections.
-- Deliver with export_project. For stems or regions, use render_batch first. To include only chosen renders with default import, use render_audio=listed and render_records=delivered; retain any renders referenced by review history. The bundle carries what MIDI cannot.
+- Deliver projects with export_project. For stems or regions, use render_batch first. To include only chosen renders with default import, use render_audio=listed and render_records=delivered; retain any renders referenced by review history. The bundle carries what MIDI cannot.
 
 ## Original data
 

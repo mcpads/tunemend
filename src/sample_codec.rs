@@ -1,10 +1,12 @@
 //! Bounded mono BRR/PCM sample decoding, encoding and measured comparison.
 //!
 //! BRR arithmetic follows the S-DSP's documented integer decoder; PlayStation
-//! SPU ADPCM and VAG are in [`crate::psx_adpcm`]. Sources may
+//! SPU ADPCM and VAG are in [`crate::psx_adpcm`], packed four-bit Mega Drive
+//! DAC codes in [`crate::md_dac`]. Sources may
 //! also be RIFF/WAVE files ([`crate::sample_wav`]); an explicit target rate
 //! resamples through [`crate::sample_resample`]. There is no interpolation,
 //! envelope or mixing here; those belong to audition.
+use crate::md_dac::{self, NibbleOrder};
 use crate::psx_adpcm::{self, Stream, TargetEnd, Vag};
 use crate::sample_loop;
 use crate::sample_resample;
@@ -16,7 +18,8 @@ use std::collections::BTreeMap;
 pub const ENCODINGS: [&str; 5] = ["brr", "u8", "s8", "s16le", "s16be"];
 /// Source-only RIFF/WAVE container encoding.
 pub const WAV: &str = "wav";
-pub const MAX_SAMPLES: usize = 131072;
+/// Bound decoded and loop-expanded work independently of container bytes.
+pub const MAX_SAMPLES: usize = 8 * 1024 * 1024;
 pub const MAX_LOOP_REPEATS: u8 = 16;
 /// S-DSP output rate and the 14-bit pitch register limit.
 pub const DSP_RATE: u32 = 32000;
@@ -81,6 +84,55 @@ pub struct SampleRequest<'a> {
     pub root: Option<Root>,
     /// Required only for PSX ADPCM/VAG choices.
     pub psx: Option<PsxOptions>,
+    /// Declared nibble order; required when the encoding or target is md_dac4.
+    pub md_dac: Option<NibbleOrder>,
+    /// Level change in dB applied to the decoded PCM16 stream before resampling
+    /// and target encoding.
+    pub gain_db: Option<f64>,
+}
+
+/// Accepted `gain_db` range.
+pub const GAIN_DB_RANGE: std::ops::RangeInclusive<f64> = -96.0..=24.0;
+
+/// Scales PCM16 samples by `db`, rounding half away from zero and clamping to
+/// 16 bits. `pcm` and `body` (a preserved loop traversal) scale alike; the
+/// report counts the clamped samples of each and the measured level change.
+fn apply_gain(pcm: &[i32], body: &[i32], db: f64) -> (Vec<i32>, Vec<i32>, Value) {
+    let factor = 10f64.powf(db / 20.0);
+    let mut clipped = [0usize; 2];
+    let mut scale = |values: &[i32], which: usize| -> Vec<i32> {
+        values
+            .iter()
+            .map(|&x| {
+                let y = (f64::from(x) * factor).round();
+                if !(-32768.0..=32767.0).contains(&y) {
+                    clipped[which] += 1;
+                }
+                y.clamp(-32768.0, 32767.0) as i32
+            })
+            .collect()
+    };
+    let (scaled, scaled_body) = (scale(pcm, 0), scale(body, 1));
+    let peak = |v: &[i32]| v.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0);
+    let energy = |v: &[i32]| v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+    let (before, after) = (energy(pcm), energy(&scaled));
+    let mut report = json!({
+        "gain_db": db,
+        "factor": factor,
+        "rounding": "x * factor rounded half away from zero, clamped to -32768..32767; applied to the decoded PCM16 stream at the source rate, before any resampling (whose own overshoot is counted in resampled.clipped_samples) and target encoding",
+        "clipped_samples": clipped[0],
+        "peak_before": peak(pcm),
+        "peak_after": peak(&scaled),
+        "measured_level_change_db": if before > 0.0 && after > 0.0 {
+            json!(10.0 * (after / before).log10())
+        } else {
+            Value::Null
+        },
+    });
+    if !body.is_empty() {
+        report["loop_traversal_clipped_samples"] = json!(clipped[1]);
+    }
+    (scaled, scaled_body, report)
 }
 
 #[derive(Debug)]
@@ -344,6 +396,8 @@ struct Source {
     /// PSX ADPCM/VAG source interpretation, and a VAG header to reuse.
     psx: Option<Value>,
     vag_header: Option<[u8; psx_adpcm::VAG_HEADER_BYTES]>,
+    /// md_dac4 source interpretation.
+    md: Option<Value>,
 }
 
 impl Source {
@@ -358,6 +412,7 @@ impl Source {
             root: request.root.map(|r| (r, "explicit")),
             psx: None,
             vag_header: None,
+            md: None,
         }
     }
 }
@@ -373,18 +428,39 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
     {
         return Err("target_sample_rate must be 1..192000 Hz".into());
     }
+    if let Some(db) = request.gain_db
+        && (!db.is_finite() || !GAIN_DB_RANGE.contains(&db) || db == 0.0)
+    {
+        return Err(format!(
+            "gain_db must be a non-zero level change within {}..{} dB; omit it to keep the level",
+            GAIN_DB_RANGE.start(),
+            GAIN_DB_RANGE.end()
+        ));
+    }
     if request.loop_repeats > MAX_LOOP_REPEATS {
         return Err("loop_repeats must be 0..16 additional traversals".into());
     }
     let target = request.target;
     let psx_source = psx_adpcm::ENCODINGS.contains(&request.encoding);
     let psx_target = psx_adpcm::ENCODINGS.contains(&target);
-    if !ENCODINGS.contains(&target) && !psx_target {
+    let md_source = request.encoding == md_dac::ENCODING;
+    let md_target = target == md_dac::ENCODING;
+    if !ENCODINGS.contains(&target) && !psx_target && !md_target {
         return Err("unsupported target".into());
     }
     if let Some(options) = &request.psx {
         check_psx_options(options, request, psx_source, psx_target)?;
     }
+    let md_order = match (request.md_dac, md_source || md_target) {
+        (Some(order), true) => Some(order),
+        (None, true) => {
+            return Err("md_dac4 needs md_dac.nibble_order (high_first or low_first): the nibble that plays first is a driver choice, declared, never inferred".into());
+        }
+        (Some(_), false) => {
+            return Err("md_dac options need an md_dac4 encoding or target".into());
+        }
+        (None, false) => None,
+    };
     if let Some(root) = request.root
         && (root.note > 127 || !(-100.0..=100.0).contains(&root.cents))
     {
@@ -396,6 +472,8 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
         return Err("wav options need encoding=wav".into());
     } else if psx_source {
         psx_source_stream(request)?
+    } else if let (true, Some(order)) = (md_source, md_order) {
+        md_source_stream(request, order)?
     } else if request.loop_policy == LoopPolicy::Finite {
         raw_finite(request)?
     } else {
@@ -407,19 +485,31 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
             16
         } else if psx_target {
             psx_adpcm::BLOCK_SAMPLES
+        } else if md_target {
+            2
         } else {
             1
         };
         check_loop_fit(block, request, &source, out_rate)?;
     }
     let mut changes = source.changes.clone();
+    // Gain comes first, at the source rate, so an attenuated stream does not
+    // clip on resampler overshoot; the previews keep the unscaled source.
+    let (gained_pcm, gained_body) = match request.gain_db {
+        None => (source.pcm.clone(), source.body.clone()),
+        Some(db) => {
+            let (pcm, body, report) = apply_gain(&source.pcm, &source.body, db);
+            changes.insert("gain".into(), report);
+            (pcm, body)
+        }
+    };
     let (pcm, body, loop_start) = if out_rate == rate {
-        (source.pcm.clone(), source.body.clone(), source.loop_start)
+        (gained_pcm, gained_body, source.loop_start)
     } else {
         let out = match source.loop_start {
-            None => sample_resample::finite(&source.pcm, rate, out_rate)?,
+            None => sample_resample::finite(&gained_pcm, rate, out_rate)?,
             Some(start) => {
-                sample_resample::looped(&source.pcm, &source.body, start, rate, out_rate)?
+                sample_resample::looped(&gained_pcm, &gained_body, start, rate, out_rate)?
             }
         };
         changes.insert("resampled".into(), out.report);
@@ -431,6 +521,7 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
     };
     let psx_choice = request.psx.clone().unwrap_or_default();
     let mut psx_report = None;
+    let mut md_report = None;
     let (encoded, actual, loop_report) = match loop_start {
         None => {
             let (encoded, actual) = if psx_target {
@@ -439,9 +530,26 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
                 } else {
                     TargetEnd::SilentLoopBlock
                 };
+                let encoded_frames = pcm.len().div_ceil(psx_adpcm::BLOCK_SAMPLES)
+                    * psx_adpcm::BLOCK_SAMPLES
+                    + if psx_choice.end_mute {
+                        0
+                    } else {
+                        psx_adpcm::BLOCK_SAMPLES
+                    };
+                if encoded_frames > MAX_SAMPLES {
+                    return Err(format!(
+                        "PSX block padding and termination need {encoded_frames} decoded samples, above {MAX_SAMPLES}; shorten the input or select end_mute if its padded size fits"
+                    ));
+                }
                 let target_psx = encode_psx(&pcm, end, target, &source, out_rate, &psx_choice)?;
                 psx_report = Some(target_psx.report);
                 (target_psx.bytes, target_psx.stream.first_pass())
+            } else if let (true, Some(order)) = (md_target, md_order) {
+                let (bytes, report) = md_dac::encode(&pcm, order);
+                md_report = Some(report);
+                let actual = md_dac::decode(&bytes, order, usize::MAX)?;
+                (bytes, actual)
             } else {
                 let encoded = if target == "brr" {
                     encode_brr(&pcm, None, false)
@@ -484,6 +592,14 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
                 let blocks = target_psx.stream.end_block + 1;
                 let actual = target_psx.stream.decode(&[(0, blocks), (block, blocks)]);
                 (target_psx.bytes, actual, offset)
+            } else if let (true, Some(order)) = (md_target, md_order) {
+                // check_loop_fit refused loops off whole bytes.
+                debug_assert!(start.is_multiple_of(2) && pcm.len().is_multiple_of(2));
+                let (bytes, report) = md_dac::encode(&pcm, order);
+                md_report = Some(report);
+                let decoded = md_dac::decode(&bytes, order, usize::MAX)?;
+                let actual = [&decoded[..], &decoded[start..]].concat();
+                (bytes, actual, start / 2)
             } else {
                 encode_preserved(&pcm, start, target)?
             };
@@ -520,6 +636,8 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
                     "BRR end and loop flags; the loop address is target_loop_offset"
                 } else if psx_target {
                     "SPU ADPCM flags: loop start (bit 2) on the block at target_loop_offset, loop end and repeat (bits 0-1) on the last block"
+                } else if md_target {
+                    "md_dac4 carries no loop; target_loop_offset (a byte) is in report.json only and the driver must be given it"
                 } else {
                     "raw PCM carries no loop; target_loop_offset is in report.json only"
                 })),
@@ -556,9 +674,16 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
     let mut report = json!({"encoding": request.encoding, "target": target,
         "sample_rate": rate, "source_samples": source.pcm.len(), "target_samples": actual.len(),
         "sample_values_exact": !changed, "decoded_stream_exact": changes.is_empty(),
-        "changes": changes, "scope": scope(policy, source.wav.is_some(), out_rate != rate, psx_source || psx_target, psx_target)});
+        "changes": changes, "scope": scope(policy, source.wav.is_some(), out_rate != rate, psx_source || psx_target, psx_target, md_source || md_target)});
     if let Some(loop_report) = loop_report {
         report["loop"] = Value::Object(loop_report);
+    }
+    if request.gain_db.is_some() {
+        let text = format!(
+            "{} The requested gain scales the stream before encoding (changes.gain); sample_values compare the target with the scaled stream.",
+            report["scope"].as_str().unwrap_or_default()
+        );
+        report["scope"] = json!(text);
     }
     if out_rate != rate {
         report["target_sample_rate"] = json!(out_rate);
@@ -571,6 +696,12 @@ pub fn convert(request: &SampleRequest) -> Result<Conversion, String> {
     }
     if let Some(psx) = psx_report {
         report["psx_adpcm_target"] = psx;
+    }
+    if let Some(md) = source.md {
+        report["md_dac"] = md;
+    }
+    if let Some(md) = md_report {
+        report["md_dac_target"] = md;
     }
     if let Some(tuning) = tuning(out_rate, target, source.root) {
         report["tuning"] = tuning;
@@ -617,6 +748,10 @@ fn check_loop_fit(
     } else if block == 16 {
         format!(
             "a BRR loop needs a 16-sample-aligned start and length; the source loops at sample {target_start} of {target_length}{at}"
+        )
+    } else if block == 2 {
+        format!(
+            "an md_dac4 loop needs a start and length on whole bytes (2 samples); the source loops at sample {target_start} of {target_length}{at}"
         )
     } else {
         format!(
@@ -672,6 +807,9 @@ fn loop_fit_recovery(
                 .iter()
                 .map(|s| s * width(request.encoding) as u64)
                 .collect();
+            format!(" (loop_offset {} bytes)", list(&bytes))
+        } else if request.encoding == md_dac::ENCODING && starts.iter().all(|s| s % 2 == 0) {
+            let bytes: Vec<u64> = starts.iter().map(|s| s / 2).collect();
             format!(" (loop_offset {} bytes)", list(&bytes))
         } else {
             " (a slice whose loop starts there)".to_owned()
@@ -854,7 +992,14 @@ fn looped_wav(pcm: &[i32], rate: u32, loop_start: usize, root: Option<(Root, &st
     out
 }
 
-fn scope(policy: &str, wav: bool, resampled: bool, psx: bool, psx_target: bool) -> String {
+fn scope(
+    policy: &str,
+    wav: bool,
+    resampled: bool,
+    psx: bool,
+    psx_target: bool,
+    md: bool,
+) -> String {
     let history = if psx {
         "initial decoder history zero (BRR or PSX SPU ADPCM)"
     } else {
@@ -863,6 +1008,9 @@ fn scope(policy: &str, wav: bool, resampled: bool, psx: bool, psx_target: bool) 
     let mut scope = format!("Mono decoded samples with {history} ({policy}).");
     if psx {
         scope += " PSX SPU ADPCM follows the documented decoding equation; other decoders may round differently.";
+    }
+    if md {
+        scope += " md_dac4 nibbles are linear upper-four-bit DAC values in the declared nibble order (an observed reading of one driver family); the format holds no rate or loop.";
     }
     if wav {
         scope += " WAV frames are reduced to one PCM16 channel as reported.";
@@ -961,6 +1109,47 @@ fn raw_preserved(request: &SampleRequest) -> Result<Source, String> {
     source
         .loop_report
         .insert("source_loop_offset".into(), json!(offset));
+    Ok(source)
+}
+
+/// An md_dac4 slice: linear nibbles in the declared order. The format holds
+/// no loop, so a preserved loop needs `loop_offset` (a slice byte).
+fn md_source_stream(request: &SampleRequest, order: NibbleOrder) -> Result<Source, String> {
+    let pcm = md_dac::decode(request.data, order, MAX_SAMPLES)?;
+    let mut source = Source::new(Vec::new(), request);
+    match request.loop_policy {
+        LoopPolicy::Finite => {
+            if request.loop_offset.is_some() || request.loop_repeats > 0 {
+                return Err("md_dac4 holds no loop; a declared loop_offset needs loop_policy=preserve, and loop_repeats cannot bake one".into());
+            }
+            source.pcm = pcm;
+        }
+        LoopPolicy::Preserve => {
+            if request.loop_repeats > 0 {
+                return Err("loop_policy=preserve keeps the loop; loop_repeats must be 0".into());
+            }
+            let offset = request.loop_offset.ok_or(
+                "loop_policy=preserve needs loop_offset for md_dac4: the format holds no loop, so the loop start byte is declared",
+            )?;
+            if offset >= request.data.len() {
+                return Err(format!(
+                    "loop_offset {offset} is outside the md_dac4 slice of {} bytes",
+                    request.data.len()
+                ));
+            }
+            let start = offset * 2;
+            if pcm.len() * 2 - start > MAX_SAMPLES {
+                return Err("expanded sample limit exceeded".into());
+            }
+            source.body = pcm[start..].to_vec();
+            source.loop_start = Some(start);
+            source
+                .loop_report
+                .insert("source_loop_offset".into(), json!(offset));
+            source.pcm = pcm;
+        }
+    }
+    source.md = Some(md_dac::report(request.data, order));
     Ok(source)
 }
 
@@ -1095,6 +1284,7 @@ fn wav_source(request: &SampleRequest) -> Result<Source, String> {
         root,
         psx: None,
         vag_header: None,
+        md: None,
     })
 }
 
@@ -1476,7 +1666,20 @@ mod tests {
             target_sample_rate: None,
             root: None,
             psx: None,
+            md_dac: None,
+            gain_db: None,
         }
+    }
+
+    #[test]
+    fn psx_padding_cannot_create_an_output_beyond_the_reinput_bound() {
+        let pcm = vec![0; MAX_SAMPLES * 2];
+        let error = convert(&request(&pcm, "s16le", "psx_adpcm"))
+            .expect_err("padded output would exceed the decoded admission bound");
+        assert!(
+            error.contains("PSX block padding and termination"),
+            "{error}"
+        );
     }
 
     #[test]

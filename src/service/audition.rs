@@ -34,7 +34,7 @@ pub struct RenderInstrumentInput {
     pub counter_start: u16,
     /// Rate written in the WAV header, 31000..33000. Samples stay one per DSP
     /// tick and are never resampled; declare an observed DSP clock (such as an
-    /// emucap capture's 32040) to compare with that capture. Default 32000.
+    /// recorded rate of 32040) to compare with that capture. Default 32000.
     #[serde(default = "nominal_rate")]
     pub wav_sample_rate: u32,
     /// Optional new folder for `audition.wav` and `audition.json`, like

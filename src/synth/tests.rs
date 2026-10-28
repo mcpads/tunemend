@@ -549,6 +549,38 @@ fn sustain_pedal_holds_released_keys() {
 }
 
 #[test]
+fn stacked_note_ons_of_one_key_release_first_in_first_out() {
+    let spec = simple_font(&[(38, -7973)]);
+    let mut s = synth(&spec, false);
+    s.note_on(0, 69, 100);
+    s.note_on(0, 69, 50);
+    s.note_on(1, 69, 100);
+    s.note_off(0, 69);
+    let state = |s: &Synthesizer| {
+        s.voices
+            .iter()
+            .map(|v| (v.channel, v.note, v.released))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        state(&s),
+        [(0, 0, true), (0, 1, false), (1, 2, false)],
+        "the first Note Off ends only the earliest instance of that channel and key"
+    );
+    s.note_off(0, 69);
+    assert_eq!(state(&s), [(0, 0, true), (0, 1, true), (1, 2, false)]);
+    // A further Note Off with no instance held changes nothing.
+    s.note_off(0, 69);
+    assert!(!s.voices[2].released);
+    // All Notes Off forgets held instances, so a later Note Off ends the new one.
+    s.note_on(1, 69, 90);
+    s.control_change(1, 123, 0);
+    s.note_on(1, 69, 80);
+    s.note_off(1, 69);
+    assert!(s.voices.iter().all(|v| v.released));
+}
+
+#[test]
 fn channel_mode_messages() {
     let spec = simple_font(&[(38, 0)]);
     let mut s = synth(&spec, false);

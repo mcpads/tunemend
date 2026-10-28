@@ -18,7 +18,16 @@ Make music the person can use: they describe the scene, listen, and tell you wha
 
 Check `get_capabilities` and `inspect_project`. Resume the relevant project or import its delivered bundle. If MCP is missing, follow [installation](references/install.md).
 
-Request only the capability sections needed for the task; use live tool schemas for arguments. The CLI exposes the same operations through `tunemend call` and `tunemend schema`.
+The main tools cover creation, inspection, edits, checks, preview, review and delivery.
+Specialist work uses `midi`, `project`, `audio`, `feedback`, `sample`, `sound`,
+`target` or `observation`. Call a group with `{"operation":"describe"}` for
+its operations; add `"select":"<operation>"` for one argument schema. Execute
+with `{"operation":"<operation>","arguments":{...}}`.
+
+Reference pages name these operations, not additional MCP buttons. MIDI operations
+use `midi`; native banks, VGM, DS and ADX use `sound`. Request capability sections
+only as needed. The CLI also accepts individual operation names for scripts and
+`tunemend schema <operation>`.
 
 For a supplied MIDI, retain it with `load_midi` before importing an editable projection. For a new piece, record the brief and choose the timebase: musical ticks for BGM, microseconds for an unmetered effect.
 
@@ -44,8 +53,9 @@ Read only the reference needed for the next decision.
 | Diagnose feedback, check a loop, deliver stems or resume a bundle | [Review and delivery](references/review-and-delivery.md) |
 | Reuse native samples and instrument programs | [Instrument banks](references/instrument-banks.md) |
 | Inspect, transplant or audition OPN patches | [FM banks](references/fm-banks.md) |
+| Inspect, replace or audition PlayStation VAB samples; read, export or audition SEQ/SEP sequences | [VAB banks](references/vab-banks.md) |
 | Inspect, audition or transform VGM chip music | [PSG and chip music](references/psg.md) |
-| Convert WAV, BRR or PSX sample representations | [Sample conversion](references/sample-conversion.md) |
+| Convert WAV, BRR, PSX, Mega Drive packed DAC or Nintendo DS sample representations, inspect DS sound archives, or decode and encode ADX streams | [Sample conversion](references/sample-conversion.md) |
 | Map a source or revision to a consumer's driver | [Score and target handoff](references/score-target.md) |
 | Associate an emulator capture with the work | [Observation evidence](references/observations.md) |
 

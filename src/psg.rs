@@ -842,6 +842,92 @@ pub fn resample_exact(
     divider: u32,
     rate: u32,
 ) -> (Vec<[f64; 2]>, Value) {
+    let (step, den) = (u128::from(clock_hz), u128::from(divider) * u128::from(rate));
+    let count = (frames.len() as u128 * den).div_ceil(step) as u64;
+    let (out, mut report) =
+        resample_positions(frames, clock_hz, divider, rate, 0, step, den, count);
+    report["position"] = json!(format!(
+        "output m at exact source position m*clock/({divider}*rate)"
+    ));
+    (out, report)
+}
+
+/// A rendered part of a VGM timeline in 44100 Hz VGM samples, `start..end`,
+/// whose native slice begins at native sample `first_native`
+/// (floor(start * clock / (divider * 44100))).
+#[derive(Clone, Copy, Debug)]
+pub struct VgmSpan {
+    pub start: u64,
+    pub end: u64,
+    pub first_native: u64,
+}
+
+/// Resampling of a native slice onto the output grid of the whole VGM
+/// timeline: output m sits at time start/44100 + m/rate, and there are
+/// ceil((end - start) * rate / 44100) outputs. At 44100 Hz a range therefore
+/// yields exactly end - start frames, and adjacent ranges tile the timeline.
+pub fn resample_span(
+    frames: &[[i16; 2]],
+    clock_hz: u32,
+    divider: u32,
+    rate: u32,
+    span: VgmSpan,
+) -> (Vec<[f64; 2]>, Value) {
+    let vgm = u128::from(VGM_SAMPLE_RATE);
+    let (clock, divider_rate) = (u128::from(clock_hz), u128::from(divider) * u128::from(rate));
+    let den = divider_rate * vgm;
+    // Position in native samples, scaled by den, relative to `first_native`.
+    let origin =
+        u128::from(span.start) * clock * u128::from(rate) - u128::from(span.first_native) * den;
+    let count =
+        (u128::from(span.end.saturating_sub(span.start)) * u128::from(rate)).div_ceil(vgm) as u64;
+    let (out, mut report) = resample_positions(
+        frames,
+        clock_hz,
+        divider,
+        rate,
+        origin,
+        clock * vgm,
+        den,
+        count,
+    );
+    report["position"] = json!(format!(
+        "output m at the range start plus m/rate: native position (start*clock*rate + m*clock*44100)/({divider}*44100*rate) - first_native"
+    ));
+    report["span"] = json!({"start_sample":span.start,"end_sample":span.end,"first_native":span.first_native,
+        "target_samples":"ceil((end_sample - start_sample) * target_rate / 44100)"});
+    (out, report)
+}
+
+/// [`resample_span`] rounded to PCM16.
+pub fn resample_span_pcm16(
+    frames: &[[i16; 2]],
+    clock_hz: u32,
+    divider: u32,
+    rate: u32,
+    span: VgmSpan,
+) -> (Vec<[i16; 2]>, Value) {
+    let (exact, mut report) = resample_span(frames, clock_hz, divider, rate, span);
+    let (out, clipped) = to_pcm16(&exact);
+    report["clipped_samples"] = json!(clipped);
+    (out, report)
+}
+
+/// The VGM timeline rate.
+const VGM_SAMPLE_RATE: u32 = 44_100;
+
+/// Output m at native position (origin + m * step) / den; `count` outputs.
+#[allow(clippy::too_many_arguments)]
+fn resample_positions(
+    frames: &[[i16; 2]],
+    clock_hz: u32,
+    divider: u32,
+    rate: u32,
+    origin: u128,
+    step: u128,
+    den: u128,
+    count: u64,
+) -> (Vec<[f64; 2]>, Value) {
     let native = f64::from(clock_hz) / f64::from(divider);
     let fc = RESAMPLE_CUTOFF * (f64::from(rate) / native).min(1.0);
     let half = RESAMPLE_ZERO_CROSSINGS / fc;
@@ -869,11 +955,9 @@ pub fn resample_exact(
             taps.into_iter().map(|w| w / sum).collect()
         })
         .collect();
-    let (step, den) = (u128::from(clock_hz), u128::from(divider) * u128::from(rate));
-    let count = (frames.len() as u128 * den).div_ceil(step) as u64;
     let mut out = Vec::with_capacity(count as usize);
     for m in 0..u128::from(count) {
-        let position = m * step;
+        let position = origin + m * step;
         let (base, rem) = ((position / den) as i64, position % den);
         let scaled = rem * RESAMPLE_PHASES as u128;
         let (index, frac) = ((scaled / den) as usize, (scaled % den) as f64 / den as f64);
@@ -893,7 +977,7 @@ pub fn resample_exact(
     }
     let report = json!({"method":"kaiser_windowed_sinc_polyphase","source_rate_exact":format!("{clock_hz}/{divider}"),
         "source_rate_hz":native,"target_rate":rate,"source_samples":frames.len(),"target_samples":out.len(),
-        "position":format!("output m at exact source position m*clock/({divider}*rate)"),"zero_crossings_per_side":RESAMPLE_ZERO_CROSSINGS,
+        "zero_crossings_per_side":RESAMPLE_ZERO_CROSSINGS,
         "kaiser_beta":RESAMPLE_KAISER_BETA,"cutoff_of_lower_nyquist":RESAMPLE_CUTOFF,
         "phases":format!("{RESAMPLE_PHASES} tabulated phases, each normalized to unit DC gain, interpolated linearly"),
         "rounding":"half away from zero to PCM16","clipped_samples":0,"boundary":"silence outside the rendered range"});

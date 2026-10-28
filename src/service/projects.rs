@@ -61,15 +61,40 @@ impl Service {
         })
     }
     pub(super) fn compare_midi(&mut self, input: CompareMidiInput) -> Handled {
-        let read = |path: &str| {
-            std::fs::read(self.workspace.join(path))
-                .map_err(|e| ToolResponse::error(format!("cannot read {path}: {e}")))
-        };
-        let result = crate::midi::compare_midi(&read(&input.reference)?, &read(&input.candidate)?);
+        let reference = self.midi_file_or_source(&input.reference, "/reference")?;
+        let candidate = self.midi_file_or_source(&input.candidate, "/candidate")?;
+        let result = crate::midi::compare_midi_page(
+            &reference,
+            &candidate,
+            input.offset.unwrap_or(0),
+            input
+                .limit
+                .map_or(crate::midi::DEFAULT_DIFFERENCE_PAGE, |l| l as usize),
+        );
         done(ToolResponse::ok(
             "MIDI comparison; no files changed",
             result,
         ))
+    }
+    /// A workspace-relative (or absolute) file, else a loaded source ID.
+    fn midi_file_or_source(&mut self, name: &str, location: &str) -> Result<Vec<u8>, ToolResponse> {
+        let path = self.workspace.join(name);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.midi_source_bytes(name).map_err(|_| {
+                    ToolResponse::refused(
+                        Code::UnknownReference,
+                        location,
+                        format!(
+                            "`{name}` is neither a file at {} nor a loaded MIDI source ID",
+                            path.display()
+                        ),
+                    )
+                })
+            }
+            Err(error) => Err(ToolResponse::error(format!("cannot read {name}: {error}"))),
+        }
     }
     pub(super) fn analyze_midi(&mut self, input: AnalyzeMidiInput) -> Handled {
         let bytes = std::fs::read(self.workspace.join(&input.path))
@@ -108,7 +133,25 @@ impl Service {
                 "the MIDI changed since inspection; inspect the current file again",
             ));
         }
-        let imported = match crate::midi::read_smf_preserving(&bytes) {
+        if let Some(crate::midi::DeclaredEnd::Fixed { ticks: 0, .. }) = input.declared_ends {
+            return done(ToolResponse::refused(
+                Code::ValueOutOfRange,
+                "/declared_ends/ticks",
+                "a fixed declared end needs a positive length in ticks",
+            ));
+        }
+        if let Some(rule) = &input.declared_ends {
+            let targets = rule.apply_to();
+            if targets.is_empty() || (1..targets.len()).any(|i| targets[..i].contains(&targets[i]))
+            {
+                return done(ToolResponse::refused(
+                    Code::InvalidRange,
+                    "/declared_ends/apply_to",
+                    "apply_to names never_released, zero_length or both, each once",
+                ));
+            }
+        }
+        let imported = match crate::midi::read_smf_declaring(&bytes, input.declared_ends.clone()) {
             Ok(imported) => imported,
             Err(diagnostics) => {
                 let mut response = ToolResponse::blocked(
@@ -139,6 +182,8 @@ impl Service {
             midi_source: Some(crate::midi::MidiSource {
                 sha256: source_sha256,
                 bytes: bytes.clone(),
+                declared_ends: input.declared_ends.clone(),
+                legacy_declared_ends: Some(false),
             }),
         };
         let revision = Revision {
@@ -166,6 +211,25 @@ impl Service {
                 "editing": crate::midi::analyze_smf(&bytes)["editing"],
             }),
         );
+        // The editing summary describes the projection this import made,
+        // including any declared ends, not the default one.
+        response.result["editing"]["retained"] = json!(imported.retained);
+        response.result["editing"]["projection_normalizations"] = json!(imported.normalizations);
+        if let Some(rule) = input.declared_ends {
+            let notes = crate::midi::declared_notes(&imported);
+            response.summary.push_str(&format!(
+                "; {} notes have a declared end by the selected rule",
+                notes.len()
+            ));
+            let left: Vec<_> = imported
+                .retained
+                .iter()
+                .filter(|r| r.message.contains("selected"))
+                .collect();
+            response.result["declared_ends"] = json!({"rule": rule, "apply_to": rule.apply_to(), "notes": notes,
+                "not_completed": left,
+                "note": "the original bytes are unchanged; an edit that changes one of these notes writes its release, and export_project with write_declared_ends writes every declared end; both report it"});
+        }
         response.artifacts.push(Artifact {
             kind: "original_midi".into(),
             path: store.object_path(&original).display().to_string(),
@@ -200,7 +264,7 @@ impl Service {
         let path = self.workspace.join(&input.path);
         let text = std::fs::read_to_string(&path)
             .map_err(|e| ToolResponse::error(format!("cannot read {}: {e}", path.display())))?;
-        let bundle: ProjectBundle = match serde_json::from_str(&text) {
+        let mut bundle: ProjectBundle = match serde_json::from_str(&text) {
             Ok(bundle) => bundle,
             Err(error) => {
                 return done(ToolResponse::refused(
@@ -210,6 +274,11 @@ impl Service {
                 ));
             }
         };
+        if let Some(source) = &mut bundle.project.midi_source
+            && let Some(root) = bundle.revisions.iter().find(|r| r.parent.is_none())
+        {
+            crate::midi::resolve_declared_projection(source, &root.composition);
+        }
         let problems = check_project_bundle(&bundle);
         if !problems.is_empty() {
             return done(ToolResponse::blocked(
@@ -235,6 +304,7 @@ impl Service {
         let gathered = self.import_render_audio(&bundle, &parent.join("renders"), &input);
         self.staged.clear();
         let (audio, regenerated) = gathered?;
+        let source_audio = self.incoming_source_reviews(&bundle, parent, input.missing_renders)?;
         let store = self.store_mut(true)?;
         if store.reader().project(&bundle.project.name)?.is_some() {
             return done(ToolResponse::refused(
@@ -258,6 +328,25 @@ impl Service {
             };
             records.push(RenderRecord { render, object });
         }
+        let source_reviews = bundle
+            .source_reviews
+            .as_ref()
+            .map(|reviews| super::source_review::imported_summary(reviews, &source_audio));
+        // The retained original becomes a loaded source with its own ID, so
+        // source tools (export_midi_source, inspect_midi, render_preview) work.
+        let original = bundle
+            .project
+            .midi_source
+            .as_ref()
+            .filter(|source| sha256_hex(&source.bytes) == source.sha256);
+        if let Some(source) = original {
+            store.put_object(&source.bytes)?;
+        }
+        for (_, wav) in &source_audio {
+            if let Some(wav) = wav {
+                store.put_object(wav)?;
+            }
+        }
         let name = bundle.project.name.clone();
         let response = ToolResponse::ok(
             format!(
@@ -271,6 +360,14 @@ impl Service {
                 "feedback": bundle.feedback.len()}),
         );
         let mut response = response;
+        let registered = original.map(|source| (source.sha256.clone(), source.bytes.len()));
+        if let Some((source, _)) = &registered {
+            response.result["midi_source"] = json!({"source": source, "loaded": true,
+                "note": "the project's retained original MIDI is a loaded source here under its original ID; export_midi_source returns its exact bytes and inspect_midi shows its events"});
+        }
+        if let Some(summary) = source_reviews {
+            response.result["source_reviews"] = summary;
+        }
         if !without_audio.is_empty() {
             response.result["renders_without_audio"] = json!(without_audio);
             response.result["renders_without_audio_note"] = json!(
@@ -312,6 +409,10 @@ impl Service {
             for export in &bundle.midi_exports {
                 writer.put_document(&name, "midi_export", &export.id, export)?;
             }
+            if let Some((source, length)) = &registered {
+                super::sources::register_source(writer, source, *length, &format!("{name}.mid"))?;
+            }
+            super::source_review::write_source_reviews(writer, &bundle, &format!("{name}.mid"))?;
             // Records already retained here keep their stored form, such as a source name.
             for record in &incoming.records {
                 if writer

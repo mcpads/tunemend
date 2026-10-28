@@ -2,6 +2,8 @@
 
 **Retro game music, made with an agent and refined through listening.**
 
+In development. No binary release is currently available.
+
 Describe a scene. Your agent makes the music, gives you a listening page, and revises it when you point out what sounds wrong. You do not need a DAW or music theory.
 
 ## What would you like to make?
@@ -36,11 +38,11 @@ You can also describe a change directly in the conversation. You do not have to 
 
 ## Get started with your agent
 
-Give your agent this request:
+For a development checkout you want to try, give your agent this request:
 
-> Install Tunemend from https://github.com/mcpads/tunemend. Follow `skills/tunemend/references/install.md`, connect it to my MCP client, and verify that it works. Then help me make a short looping theme.
+> Build Tunemend from this checkout. Follow `skills/tunemend/references/install.md`, connect it to my MCP client, and verify actual tool calls. Then help me make a short looping theme.
 
-The agent handles installation and connection checks. Native downloads are provided through [Releases](https://github.com/mcpads/tunemend/releases) for macOS, Linux and Windows; the [installation guide](skills/tunemend/references/install.md) lists supported systems. Codex and Claude Code can use it through MCP.
+The agent handles the build and connection checks. The [installation guide](skills/tunemend/references/install.md) covers source builds and how to verify a future binary release. Codex and Claude Code connect through MCP; the current development checks are on macOS.
 
 ## Take the result with you
 

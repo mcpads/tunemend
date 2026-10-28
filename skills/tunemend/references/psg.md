@@ -113,7 +113,12 @@ Call `render_psg` with `vgm` set to the source ID and a new `destination`.
 - `range` (`start_sample`, `end_sample` in 44100 Hz VGM samples of the unrolled
   timeline) renders an excerpt. Earlier writes are still applied, so the excerpt
   matches the same span of a full render exactly. One call covers at most
-  120 s.
+  120 s; hear a longer song in consecutive ranges (0..5292000,
+  5292000..10584000, …). With `output_sample_rate` the resampled output sits
+  on the timeline's grid: at 44100 Hz a range has exactly `end_sample −
+  start_sample` frames, so consecutive ranges join without a gap or an extra
+  frame (only the samples nearest a join differ from one longer render, since
+  each call's resampler sees silence outside its own range).
 - `output_sample_rate` (for example 44100) writes `render-<rate>.wav`. Without
   it, a single chip's `render.wav` is written at its native rate (SN76489
   clock / 16, about 223.7 kHz; AY clock / 8; Game Boy clock / 32, 131072 Hz;

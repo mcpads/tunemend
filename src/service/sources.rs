@@ -15,6 +15,43 @@ struct SourceRecord {
     children: Vec<crate::midi::EmbeddedMidi>,
 }
 
+/// States up front whether the source has any timed content. A file whose
+/// every event sits at tick 0 loads and exports exactly but has nothing to
+/// play, edit in time or map.
+fn describe_timing(summary: &mut Value, bytes: &[u8]) {
+    let Some(timed) = crate::render::has_timed_content(bytes) else {
+        return;
+    };
+    summary["timed_content"] = json!(timed);
+    if !timed {
+        summary["timed_content_note"] = json!(
+            "every event is at tick 0, so there is nothing to play, place in time or map; the file is retained and exports exactly. Report this to the person with the events it does hold (inspect_midi), and do not add notes or timing to make it playable"
+        );
+    }
+}
+
+/// Records a source whose bytes are already stored, unless it is loaded.
+pub(super) fn register_source(
+    writer: &crate::store::Writer,
+    sha256: &str,
+    bytes: usize,
+    name: &str,
+) -> Result<(), crate::store::StoreError> {
+    if writer
+        .document::<SourceRecord>(SOURCE_OWNER, SOURCES, sha256)?
+        .is_none()
+    {
+        let record = SourceRecord {
+            sha256: sha256.to_owned(),
+            bytes,
+            name: name.to_owned(),
+            children: vec![],
+        };
+        writer.put_document(SOURCE_OWNER, SOURCES, sha256, &record)?;
+    }
+    Ok(())
+}
+
 impl Service {
     pub(super) fn midi_source_bytes(&mut self, source: &str) -> Result<Vec<u8>, ToolResponse> {
         let store = self.store_ref()?;
@@ -76,6 +113,7 @@ impl Service {
             // Projection diagnostics never turn successful source loading into failure.
             let projection = crate::midi::analyze_smf(&bytes);
             summary["editable_projection"] = json!({"available": projection["can_import"], "diagnostics": projection["diagnostics"], "editing": projection["editing"], "preview": projection["preview"]});
+            describe_timing(&mut summary, &bytes);
         } else {
             summary["editable_projection"] = json!({"available": false, "next_action": "select a child MIDI source first; no arrangement or target mapping has been applied"});
         }
@@ -167,6 +205,7 @@ impl Service {
                     crate::midi::source_summary(&bytes).map(|mut summary| {
                         let projection = crate::midi::analyze_smf(&bytes);
                         summary["editable_projection"] = json!({"available": projection["can_import"], "diagnostics": projection["diagnostics"], "editing": projection["editing"], "preview": projection["preview"]});
+                        describe_timing(&mut summary, &bytes);
                         summary
                     })
                 }

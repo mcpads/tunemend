@@ -405,7 +405,13 @@ impl Processor for SnCopy {
             }
         }
         let noise_audible = target.att[3] < 15;
-        if noise_audible && self.input.noise & 3 == 3 && self.k[2] != self.clock_k {
+        // Rate 3 follows tone 2's period: only a period that actually changes
+        // (not a held or unchanged one) moves the noise.
+        if noise_audible
+            && self.input.noise & 3 == 3
+            && self.k[2] != self.clock_k
+            && target.tone[2] != self.input.tone[2]
+        {
             losses.add(
                 LossCode::NoiseFollowsTone2,
                 first.index,

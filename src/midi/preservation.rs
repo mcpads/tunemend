@@ -18,7 +18,18 @@ fn source_projection(source: &MidiSource) -> Result<ImportedMidi, Vec<Diagnostic
             "the original MIDI bytes do not match their recorded hash",
         ));
     }
-    read_smf_preserving(&source.bytes)
+    project_source_bytes(source, &source.bytes)
+}
+
+fn project_source_bytes(
+    source: &MidiSource,
+    bytes: &[u8],
+) -> Result<ImportedMidi, Vec<Diagnostic>> {
+    if source.legacy_declared_ends == Some(true) {
+        super::import::read_smf_legacy_declaring(bytes, source.declared_ends.clone())
+    } else {
+        read_smf_declaring(bytes, source.declared_ends.clone())
+    }
 }
 
 pub fn check_source_edit(
@@ -112,6 +123,19 @@ pub fn write_preserving(
     composition: &Composition,
     plan: &MidiExport,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    write_preserving_declared(source, timebase, composition, plan, false)
+}
+
+/// [`write_preserving`] that, with `write_declared`, also writes the release
+/// of every declared-end note at its projected end, so playback and other
+/// players stop it there. Without it only changed declared notes are written.
+pub fn write_preserving_declared(
+    source: &MidiSource,
+    timebase: Timebase,
+    composition: &Composition,
+    plan: &MidiExport,
+    write_declared: bool,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
     check_source_edit(source, timebase, composition)?;
     let imported = source_projection(source)?;
     if plan.assignments != imported.assignments || plan.timing.is_some() {
@@ -126,12 +150,19 @@ pub fn write_preserving(
     comparable.voices = old.voices.clone();
     comparable.sections = old.sections.clone();
     comparable.mix = old.mix.clone();
-    if &comparable == old {
+    let declared = write_declared && imported.note_bindings.iter().any(|b| b.declared.is_some());
+    if &comparable == old && !declared {
         return Ok(source.bytes.clone());
     }
     let mut diagnostics = Vec::new();
-    check_composition(
+    check_composition_with(
         timebase,
+        composition,
+        StackedNotes::SourcePaired,
+        &mut Report::new("/composition", &mut diagnostics),
+    );
+    check_stacked_notes(
+        old,
         composition,
         &mut Report::new("/composition", &mut diagnostics),
     );
@@ -139,16 +170,36 @@ pub fn write_preserving(
         return Err(diagnostics);
     }
     let smf = Smf::parse(&source.bytes).map_err(|e| refuse("/midi_source", &e.to_string()))?;
-    let old_notes: HashMap<_, _> = old
-        .notes
-        .iter()
-        .map(|n| ((n.voice.clone(), n.start, n.pitch), n))
-        .collect();
+    let multiple = multiple_receivers(&smf);
+    // Notes bind to their source events by identity, never by time or pitch,
+    // so stacked onsets of one key keep their own events.
+    let old_notes: HashMap<&str, &Note> = old.notes.iter().map(|n| (n.id.as_str(), n)).collect();
     let new_notes: HashMap<_, _> = composition
         .notes
         .iter()
         .map(|n| (n.id.as_str(), n))
         .collect();
+    let mut roles: HashMap<SourceEvent, (bool, &str)> = HashMap::new();
+    // Declared-end notes that changed and have no source release to move.
+    let mut written_releases = Vec::new();
+    for binding in &imported.note_bindings {
+        let id = binding.id.as_str();
+        // An unchanged declared end is projection only: its events stay as
+        // they are, including a zero-length release.
+        if binding.declared.is_some()
+            && !write_declared
+            && new_notes.get(id) == Some(&old_notes[id])
+        {
+            continue;
+        }
+        roles.insert(binding.onset, (true, id));
+        match binding.release {
+            Some(release) => {
+                roles.insert(release, (false, id));
+            }
+            None => written_releases.push((binding.onset.0, id)),
+        }
+    }
     let old_ids: std::collections::HashSet<_> = old.notes.iter().map(|n| n.id.as_str()).collect();
     let mut changed_lanes = BTreeMap::new();
     for lane in old.control_lanes.iter().chain(&composition.control_lanes) {
@@ -174,29 +225,45 @@ pub fn write_preserving(
     let mut tracks = Vec::new();
     for (track_index, track) in smf.tracks.iter().enumerate() {
         let mut tick = 0u64;
+        let mut port = 0;
         let mut last_control = BTreeMap::new();
         let mut last_tempo = BTreeMap::new();
         for (index, event) in track.iter().enumerate() {
             tick += u64::from(event.delta.as_int());
+            if let TrackEventKind::Meta(MetaMessage::MidiPort(value)) = event.kind {
+                port = value.as_int();
+            }
             if matches!(event.kind, TrackEventKind::Meta(MetaMessage::Tempo(_))) {
                 last_tempo.insert(tick, index);
             }
             if let TrackEventKind::Midi { channel, message } = event.kind
                 && let Some((kind, _)) = direct_control(message)
             {
-                last_control.insert((channel.as_int(), kind, tick), index);
+                last_control.insert(
+                    (
+                        receiver_channel(multiple, port, channel.as_int()),
+                        kind,
+                        tick,
+                    ),
+                    index,
+                );
             }
         }
         let mut events = Vec::new();
-        let mut held = HashMap::new();
         tick = 0;
+        port = 0;
         for (index, event) in track.iter().enumerate() {
             tick += u64::from(event.delta.as_int());
             let mut at = tick;
             let mut order = index as i64;
             let mut kind = event.kind;
+            if let TrackEventKind::Meta(MetaMessage::MidiPort(value)) = kind {
+                port = value.as_int();
+            }
             match kind {
-                TrackEventKind::Meta(MetaMessage::Tempo(_)) if tempo_changed => {
+                TrackEventKind::Meta(MetaMessage::Tempo(_))
+                    if tempo_changed && tick < old.playback.end =>
+                {
                     let Some(point) = composition.tempo_map.iter().find(|p| p.tick == tick) else {
                         continue;
                     };
@@ -231,15 +298,16 @@ pub fn write_preserving(
                 _ => {}
             }
             if let TrackEventKind::Midi { channel, message } = kind {
-                let voice = format!("track{track_index}-ch{}", channel.as_int() + 1);
+                let receiver = receiver_channel(multiple, port, channel.as_int());
+                let voice = source_voice(track_index, receiver);
+                let role = roles.get(&(track_index, index)).copied();
                 match message {
-                    MidiMessage::NoteOn { key, vel } if vel.as_int() > 0 => {
-                        let original =
-                            old_notes.get(&(voice, tick, key.as_int())).ok_or_else(|| {
-                                refuse("/notes", "source note binding could not be recovered")
-                            })?;
-                        held.insert((channel.as_int(), key.as_int()), original.id.as_str());
-                        let Some(note) = new_notes.get(original.id.as_str()) else {
+                    // Retained note events without an editable note stay as they are.
+                    MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. } if role.is_none() => {}
+                    MidiMessage::NoteOn { .. } | MidiMessage::NoteOff { .. } => {
+                        let (onset, id) = role.expect("bound note event");
+                        let original = old_notes[id];
+                        let Some(note) = new_notes.get(id) else {
                             continue;
                         };
                         if note.voice != original.voice {
@@ -248,47 +316,40 @@ pub fn write_preserving(
                                 "moving an imported note to another voice is not yet implemented losslessly",
                             ));
                         }
-                        at = note.start;
-                        if at != tick {
-                            order = i64::MAX - 1;
+                        if onset {
+                            at = note.start;
+                            if at != tick {
+                                order = i64::MAX - 1;
+                            }
+                            kind = TrackEventKind::Midi {
+                                channel,
+                                message: MidiMessage::NoteOn {
+                                    key: u7::new(note.pitch),
+                                    vel: u7::new(note.velocity),
+                                },
+                            };
+                        } else {
+                            at = note.start + note.duration;
+                            if at != tick {
+                                order = i64::MIN;
+                            }
+                            let off = match (message, note.release_velocity) {
+                                (MidiMessage::NoteOn { .. }, None) => MidiMessage::NoteOn {
+                                    key: u7::new(note.pitch),
+                                    vel: u7::new(0),
+                                },
+                                _ => MidiMessage::NoteOff {
+                                    key: u7::new(note.pitch),
+                                    vel: u7::new(
+                                        note.release_velocity.unwrap_or(DEFAULT_RELEASE_VELOCITY),
+                                    ),
+                                },
+                            };
+                            kind = TrackEventKind::Midi {
+                                channel,
+                                message: off,
+                            };
                         }
-                        kind = TrackEventKind::Midi {
-                            channel,
-                            message: MidiMessage::NoteOn {
-                                key: u7::new(note.pitch),
-                                vel: u7::new(note.velocity),
-                            },
-                        };
-                    }
-                    MidiMessage::NoteOff { key, .. } | MidiMessage::NoteOn { key, .. } => {
-                        let id =
-                            held.remove(&(channel.as_int(), key.as_int()))
-                                .ok_or_else(|| {
-                                    refuse("/notes", "source note release could not be bound")
-                                })?;
-                        let Some(note) = new_notes.get(id) else {
-                            continue;
-                        };
-                        at = note.start + note.duration;
-                        if at != tick {
-                            order = i64::MIN;
-                        }
-                        let off = match (message, note.release_velocity) {
-                            (MidiMessage::NoteOn { .. }, None) => MidiMessage::NoteOn {
-                                key: u7::new(note.pitch),
-                                vel: u7::new(0),
-                            },
-                            _ => MidiMessage::NoteOff {
-                                key: u7::new(note.pitch),
-                                vel: u7::new(
-                                    note.release_velocity.unwrap_or(DEFAULT_RELEASE_VELOCITY),
-                                ),
-                            },
-                        };
-                        kind = TrackEventKind::Midi {
-                            channel,
-                            message: off,
-                        };
                     }
                     _ => {
                         if tick < old.playback.end
@@ -300,7 +361,7 @@ pub fn write_preserving(
                             let Some(point) = point else {
                                 continue;
                             };
-                            if last_control[&(channel.as_int(), control, tick)] == index {
+                            if last_control[&(receiver, control, tick)] == index {
                                 kind = TrackEventKind::Midi {
                                     channel,
                                     message: control_message(control, point.value),
@@ -321,7 +382,12 @@ pub fn write_preserving(
             else {
                 continue;
             };
-            if note.voice != format!("track{track_index}-ch{}", assignment.channel + 1) {
+            if note.voice
+                != source_voice(
+                    track_index,
+                    receiver_channel(multiple, assignment.port.unwrap_or(0), assignment.channel),
+                )
+            {
                 continue;
             }
             let channel = u4::new(assignment.channel);
@@ -348,16 +414,49 @@ pub fn write_preserving(
                 },
             ));
         }
+        for (_, id) in written_releases.iter().filter(|(t, _)| *t == track_index) {
+            let Some(note) = new_notes.get(id) else {
+                continue;
+            };
+            let Some(assignment) = imported.assignments.iter().find(|a| a.voice == note.voice)
+            else {
+                continue;
+            };
+            events.push((
+                note.start + note.duration,
+                i64::MIN,
+                TrackEventKind::Midi {
+                    channel: u4::new(assignment.channel),
+                    message: MidiMessage::NoteOff {
+                        key: u7::new(note.pitch),
+                        vel: u7::new(note.release_velocity.unwrap_or(DEFAULT_RELEASE_VELOCITY)),
+                    },
+                },
+            ));
+        }
         for ((voice, control), lane) in &changed_lanes {
             let Some(assignment) = imported.assignments.iter().find(|a| &a.voice == voice) else {
                 continue;
             };
-            if *voice != format!("track{track_index}-ch{}", assignment.channel + 1) {
+            if *voice
+                != source_voice(
+                    track_index,
+                    receiver_channel(multiple, assignment.port.unwrap_or(0), assignment.channel),
+                )
+            {
                 continue;
             }
             if let Some(lane) = lane {
                 for point in &lane.points {
-                    if !last_control.contains_key(&(assignment.channel, *control, point.at)) {
+                    if !last_control.contains_key(&(
+                        receiver_channel(
+                            multiple,
+                            assignment.port.unwrap_or(0),
+                            assignment.channel,
+                        ),
+                        *control,
+                        point.at,
+                    )) {
                         events.push((
                             point.at,
                             i64::MIN + 1,
@@ -452,7 +551,7 @@ pub fn write_preserving(
     }
     let bytes = super::source::write_source_tracks(&source.bytes, &tracks)?;
     // Detect newly ambiguous note pairing, e.g. a pitch edit creating overlap.
-    let readback = read_smf_preserving(&bytes)?;
+    let readback = project_source_bytes(source, &bytes)?;
     let normalize = |c: &Composition| {
         let mut c = c.clone();
         for note in &mut c.notes {
@@ -479,62 +578,78 @@ pub fn write_preserving(
     if normalize(&readback.composition) != normalize(composition) {
         return Err(refuse(
             "/composition",
-            "the edited MIDI does not read back to the requested composition; no output was accepted",
+            if source.declared_ends.is_some() {
+                "the edited MIDI does not read back to the requested composition; no output was accepted. A written or moved declared-end release must not change first-in-first-out pairing, for example by ending after a later note of the same key is released"
+            } else {
+                "the edited MIDI does not read back to the requested composition; no output was accepted"
+            },
+        ));
+    }
+    // Retained note events keep their tracks, ticks and messages. Readback must
+    // not pair them with edited notes or leave edited events unpaired.
+    let retained = |events: &[RetainedNoteEvent]| {
+        let mut events: Vec<_> = events
+            .iter()
+            .map(|e| (e.event.0, e.tick, e.channel, e.message))
+            .collect();
+        events.sort_by_key(|(track, tick, channel, message)| {
+            (*track, *tick, *channel, format!("{message:?}"))
+        });
+        events
+    };
+    if retained(&readback.retained_note_events) != retained(&imported.retained_note_events) {
+        return Err(refuse(
+            "/composition/notes",
+            "the edit changes which source note events pair into notes; retained note events must stay unpaired and edited notes paired",
         ));
     }
     Ok(bytes)
 }
 
-pub fn compare_midi(reference: &[u8], candidate: &[u8]) -> Value {
-    let parsed = (
-        midly::SmfBytemap::parse(reference),
-        midly::SmfBytemap::parse(candidate),
-    );
-    let (Ok(reference_smf), Ok(candidate_smf)) = parsed else {
-        return json!({"comparable": false, "byte_identical": reference == candidate,
-            "events_identical": false, "reason": "both inputs must be well-formed Standard MIDI Files"});
-    };
-    let mut differences = Vec::new();
-    if reference_smf.header != candidate_smf.header {
-        differences.push(json!({"location": "/header", "reference": format!("{:?}", reference_smf.header), "candidate": format!("{:?}", candidate_smf.header)}));
-    }
-    if reference_smf.tracks.len() != candidate_smf.tracks.len() {
-        differences.push(json!({"location": "/tracks", "reference": reference_smf.tracks.len(), "candidate": candidate_smf.tracks.len()}));
-    }
-    let mut event_differences = 0;
-    for (track, (left, right)) in reference_smf
-        .tracks
-        .iter()
-        .zip(&candidate_smf.tracks)
-        .enumerate()
-    {
-        if left.len() != right.len() {
-            differences.push(json!({"location": format!("/tracks/{track}"), "reference_events": left.len(), "candidate_events": right.len()}));
+/// Same-pitch notes of one voice may overlap only where the source already
+/// stacked them; a new overlap would pair ambiguously.
+fn check_stacked_notes(old: &Composition, composition: &Composition, report: &mut Report) {
+    let unordered = |(a, b): &(String, String)| {
+        if a < b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
         }
-        let (mut left_tick, mut right_tick) = (0u64, 0u64);
-        for (index, ((raw_a, a), (raw_b, b))) in left.iter().zip(right).enumerate() {
-            left_tick += u64::from(a.delta.as_int());
-            right_tick += u64::from(b.delta.as_int());
-            if left_tick != right_tick
-                || a.kind != b.kind
-                || super::source::meta_payload(raw_a) != super::source::meta_payload(raw_b)
-            {
-                event_differences += 1;
-                if differences.len() < 20 {
-                    differences.push(json!({"location": format!("/tracks/{track}/events/{index}"), "reference_tick": left_tick, "candidate_tick": right_tick, "reference": format!("{:?}", a.kind), "candidate": format!("{:?}", b.kind)}));
-                }
+    };
+    let source_pairs: std::collections::BTreeSet<_> =
+        overlapping_pairs(old).iter().map(unordered).collect();
+    for pair @ (first, second) in &overlapping_pairs(composition) {
+        if !source_pairs.contains(&unordered(pair)) {
+            let index = composition.notes.iter().position(|n| &n.id == second);
+            report.push(
+                Code::OverlappingNotes,
+                format!("notes/{}", index.unwrap_or_default()),
+                format!("note `{second}` would start while `{first}` of the same pitch still sounds in the same voice; only stacks present in the source MIDI are kept"),
+            );
+        }
+    }
+}
+
+/// Note ID pairs `(earlier, later)` of one voice and pitch that overlap.
+fn overlapping_pairs(composition: &Composition) -> std::collections::BTreeSet<(String, String)> {
+    let mut groups: BTreeMap<(&str, u8), Vec<&Note>> = BTreeMap::new();
+    for note in &composition.notes {
+        groups
+            .entry((note.voice.as_str(), note.pitch))
+            .or_default()
+            .push(note);
+    }
+    let mut pairs = std::collections::BTreeSet::new();
+    for notes in groups.values_mut() {
+        notes.sort_by_key(|n| (n.start, n.id.as_str()));
+        for (i, earlier) in notes.iter().enumerate() {
+            let end = earlier.end().unwrap_or(u64::MAX);
+            for later in notes[i + 1..].iter().take_while(|n| n.start < end) {
+                pairs.insert((earlier.id.clone(), later.id.clone()));
             }
         }
     }
-    json!({"comparable": true, "byte_identical": reference == candidate,
-        "events_identical": reference_smf.header == candidate_smf.header && reference_smf.tracks.len() == candidate_smf.tracks.len() && reference_smf.tracks.iter().zip(&candidate_smf.tracks).all(|(a,b)| a.len() == b.len()) && event_differences == 0,
-        "container_identical": match (super::source::container_data(reference), super::source::container_data(candidate)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        }, "aligned_event_differences": event_differences,
-        "differences": differences, "reference_sha256": crate::store::sha256_hex(reference),
-        "candidate_sha256": crate::store::sha256_hex(candidate),
-        "scope": "MIDI headers, tracks, every event class, exact ticks and event order. This does not compare audio or prove target playback."})
+    pairs
 }
 
 fn has_meta_at(smf: &Smf<'_>, at: u64, class: u8) -> bool {
@@ -553,6 +668,134 @@ fn has_meta_at(smf: &Smf<'_>, at: u64, class: u8) -> bool {
     })
 }
 
+/// Channel state is shared by every voice that sends on a channel: a control
+/// event affects all of their notes, and a release can end another voice's
+/// sounding note of that key. Changes there must be in scope for, and are
+/// protected by, every voice they reach, not only the voice holding the event.
+pub fn check_source_bounds(
+    source: &MidiSource,
+    base: &Composition,
+    result: &Composition,
+    request: &crate::edit::EditRequest,
+) -> Result<(), Vec<Diagnostic>> {
+    let imported = source_projection(source)?;
+    let mut channel_voices: BTreeMap<(Option<u8>, u8), Vec<&str>> = BTreeMap::new();
+    for assignment in &imported.assignments {
+        channel_voices
+            .entry((assignment.port, assignment.channel))
+            .or_default()
+            .push(assignment.voice.as_str());
+    }
+    let sharing = |voice: &str| -> Vec<&str> {
+        imported
+            .assignments
+            .iter()
+            .find(|a| a.voice == voice)
+            .and_then(|a| channel_voices.get(&(a.port, a.channel)))
+            .map(|voices| voices.iter().copied().filter(|v| *v != voice).collect())
+            .unwrap_or_default()
+    };
+    let mut diagnostics = Vec::new();
+    let mut report = Report::new("", &mut diagnostics);
+    let lane = |c: &Composition, voice: &str, kind: ControlKind| -> Vec<ControlPoint> {
+        c.control_lanes
+            .iter()
+            .find(|l| l.voice == voice && l.kind == kind)
+            .map(|l| l.points.clone())
+            .unwrap_or_default()
+    };
+    let mut lanes: Vec<(&str, ControlKind)> = base
+        .control_lanes
+        .iter()
+        .chain(&result.control_lanes)
+        .map(|l| (l.voice.as_str(), l.kind))
+        .collect();
+    lanes.sort();
+    lanes.dedup();
+    for (voice, kind) in lanes {
+        let others = sharing(voice);
+        if others.is_empty() {
+            continue;
+        }
+        let (before, after) = (lane(base, voice, kind), lane(result, voice, kind));
+        // A step value holds until the next point of the lane.
+        let end = base.playback.end.max(result.playback.end);
+        let spans: Vec<(u64, u64)> = before
+            .iter()
+            .filter(|p| !after.contains(p))
+            .chain(after.iter().filter(|p| !before.contains(p)))
+            .map(|point| {
+                let next = before
+                    .iter()
+                    .chain(&after)
+                    .map(|p| p.at)
+                    .filter(|t| *t > point.at)
+                    .min()
+                    .unwrap_or(end);
+                (point.at, next.max(point.at + 1))
+            })
+            .collect();
+        if spans.is_empty() {
+            continue;
+        }
+        let versions: Vec<(&str, Option<(u64, u64)>)> = others
+            .iter()
+            .flat_map(|other| spans.iter().map(move |span| (*other, Some(*span))))
+            .collect();
+        crate::edit::check_change(
+            request,
+            &versions,
+            &mut report,
+            format!(
+                "{kind:?} control of `{voice}`, which reaches every voice on its MIDI channel,"
+            ),
+        );
+    }
+    let notes = |c: &Composition| -> HashMap<String, Note> {
+        c.notes.iter().map(|n| (n.id.clone(), n.clone())).collect()
+    };
+    let (before, after) = (notes(base), notes(result));
+    let mut ids: Vec<&String> = before.keys().chain(after.keys()).collect();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        let (old, new) = (before.get(id), after.get(id));
+        if old == new {
+            continue;
+        }
+        let mut versions = Vec::new();
+        for changed in old.into_iter().chain(new) {
+            let span = (changed.start, changed.end().unwrap_or(u64::MAX));
+            for other in sharing(&changed.voice) {
+                let reached = base.notes.iter().chain(&result.notes).any(|n| {
+                    n.voice == other
+                        && n.pitch == changed.pitch
+                        && n.start < span.1
+                        && span.0 < n.end().unwrap_or(u64::MAX)
+                });
+                if reached {
+                    versions.push((other, Some(span)));
+                }
+            }
+        }
+        if !versions.is_empty() {
+            crate::edit::check_change(
+                request,
+                &versions,
+                &mut report,
+                format!(
+                    "note `{id}`, which shares its MIDI channel and key with another voice's sounding note,"
+                ),
+            );
+        }
+    }
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(diagnostics)
+    }
+}
+
 pub fn check_source_revision(
     source: &MidiSource,
     timebase: Timebase,
@@ -567,4 +810,88 @@ pub fn check_source_revision(
         sections_as_markers: false,
     };
     write_preserving(source, timebase, composition, &plan).map(|_| ())
+}
+
+/// Notes whose end comes from the source's declared end rule.
+pub fn declared_notes(imported: &ImportedMidi) -> Vec<Value> {
+    imported
+        .note_bindings
+        .iter()
+        .filter_map(|binding| {
+            let from = binding.declared?;
+            let note = imported
+                .composition
+                .notes
+                .iter()
+                .find(|n| n.id == binding.id)?;
+            Some(
+                json!({"note": note.id, "from": from, "voice": note.voice, "start": note.start,
+                "declared_end": note.start + note.duration,
+                "onset": format!("/tracks/{}/events/{}", binding.onset.0, binding.onset.1)}),
+            )
+        })
+        .collect()
+}
+
+/// What an edit writes for declared-end notes it changes: a new release, a
+/// moved zero-length release, or removal of the source events.
+pub fn declared_end_changes(
+    source: &MidiSource,
+    composition: &Composition,
+    write_declared: bool,
+) -> Result<Vec<Value>, Vec<Diagnostic>> {
+    let imported = source_projection(source)?;
+    let mut changes = Vec::new();
+    for binding in imported
+        .note_bindings
+        .iter()
+        .filter(|b| b.declared.is_some())
+    {
+        let old = imported
+            .composition
+            .notes
+            .iter()
+            .find(|n| n.id == binding.id);
+        let new = composition.notes.iter().find(|n| n.id == binding.id);
+        if old == new && !write_declared {
+            continue;
+        }
+        let onset = format!("/tracks/{}/events/{}", binding.onset.0, binding.onset.1);
+        changes.push(match (new, binding.release) {
+            (None, _) => json!({"note": binding.id, "onset": onset, "change": "removed its source onset and any release"}),
+            (Some(note), None) => json!({"note": note.id, "onset": onset, "release_written_at": note.start + note.duration,
+                "change": "wrote a release the source did not have"}),
+            (Some(note), Some(release)) => json!({"note": note.id, "onset": onset, "release_written_at": note.start + note.duration,
+                "change": format!("moved the zero-length release /tracks/{}/events/{}", release.0, release.1)}),
+        });
+    }
+    Ok(changes)
+}
+
+/// A retained never-released note: it has no note id and sounds from its
+/// onset until the transport releases held notes at the content end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldRetainedNote {
+    pub source_event: String,
+    pub voice: String,
+    pub pitch: u8,
+    pub start: u64,
+}
+
+pub fn held_retained_notes(source: &MidiSource) -> Result<Vec<HeldRetainedNote>, Vec<Diagnostic>> {
+    let imported = source_projection(source)?;
+    Ok(imported
+        .retained_note_events
+        .iter()
+        .filter(|e| e.kind == RetainedKind::NeverReleased)
+        .filter_map(|e| match e.message {
+            MidiMessage::NoteOn { key, vel } if vel.as_int() > 0 => Some(HeldRetainedNote {
+                source_event: format!("/tracks/{}/events/{}", e.event.0, e.event.1),
+                voice: source_voice(e.event.0, e.channel),
+                pitch: key.as_int(),
+                start: e.tick,
+            }),
+            _ => None,
+        })
+        .collect())
 }

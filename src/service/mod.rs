@@ -7,6 +7,11 @@
 // Handlers return the finished response early as `Err`; it is built once per call.
 #![allow(clippy::result_large_err)]
 
+mod adx;
+pub use adx::{
+    AdxArithmetic, AdxChange, AdxFrameRange, AdxLoopFrames, AdxSpan, AdxView, EncodeAdxInput,
+    InspectAdxInput, RankAdxLoopsInput, RenderAdxInput,
+};
 mod audition;
 pub use audition::{DspEnvelope, DspPitch, RenderInstrumentInput, StereoVolume};
 mod batch;
@@ -22,7 +27,11 @@ pub use fm_audition::RenderFmPatchInput;
 mod inspection;
 mod instrument_sources;
 mod measurement;
+mod nds_sound;
 pub use measurement::{AudioInput, AudioRange, CompareAudioInput, MeasureAudioInput};
+pub use nds_sound::{
+    ExportNdsSampleInput, InspectNdsSoundInput, NdsEncoding, NdsView, ReplaceNdsWaveInput,
+};
 mod instruments;
 pub use instrument_sources::{
     ExportInstrumentSourceInput, InspectInstrumentSourceInput, LoadInstrumentSourceInput,
@@ -39,6 +48,11 @@ pub use psg::{
     VgmView,
 };
 mod projects;
+mod psx_seq;
+pub use psx_seq::{
+    ExportPsxSequenceInput, InspectPsxSequenceInput, LoadPsxSequenceInput, PsxSequenceView,
+    RenderPsxSequenceInput,
+};
 mod review;
 mod samples;
 mod score;
@@ -47,13 +61,21 @@ pub use instruments::{
     LoadInstrumentBankInput,
 };
 pub use samples::{ExportSampleInput, InspectSampleInput, PrepareSampleInput, SampleDetail};
+mod source_review;
 mod sources;
 pub use score::{ExportTargetInput, InspectTargetInput, PrepareTargetInput};
 mod audio_clips;
 mod referenced_data;
+mod surface;
 mod tools;
+pub use surface::{operation_group, surface_definitions};
 mod transformation;
 pub use transformation::TransformVgmInput;
+mod vab;
+pub use vab::{
+    ExportVabBankInput, InspectVabBankInput, LoadVabBankInput, RenderVabToneInput,
+    ReplaceVabSampleInput, VabFraming, VabLayout, VabPart, VabToneUpdate, VabView,
+};
 mod voice_instruments;
 
 use inspection::capabilities;
@@ -71,7 +93,7 @@ use crate::bundle::{ProjectBrief, ProjectBundle, ProjectInfo, Revision, check_pr
 use crate::compare::compare_compositions;
 use crate::composition::{Composition, Note, Playback, TempoChange, TimeSignature, Timebase};
 use crate::diagnostic::{Diagnostic, DiagnosticCode as Code};
-use crate::edit::{EditRequest, TimeRange, apply_edit};
+use crate::edit::{EditRequest, TimeRange};
 use crate::export::{MidiExport, MidiTiming, VoiceAssignment};
 use crate::midi::write_smf;
 use crate::profile::{ConstraintProfile, builtin_profiles, check_profile};
@@ -253,8 +275,19 @@ fn canonicalizer(tool: &str) -> Option<Canonicalize> {
         "copy_fm_patch" => typed::<CopyFmPatchInput>,
         "export_fm_bank" => typed::<ExportFmBankInput>,
         "render_fm_patch" => typed::<RenderFmPatchInput>,
+        "load_vab_bank" => typed::<LoadVabBankInput>,
+        "replace_vab_sample" => typed::<ReplaceVabSampleInput>,
+        "export_vab_bank" => typed::<ExportVabBankInput>,
+        "render_vab_tone" => typed::<RenderVabToneInput>,
+        "load_psx_sequence" => typed::<LoadPsxSequenceInput>,
+        "export_psx_sequence" => typed::<ExportPsxSequenceInput>,
+        "render_psx_sequence" => typed::<RenderPsxSequenceInput>,
         "render_psg" => typed::<RenderPsgInput>,
         "transform_vgm" => typed::<TransformVgmInput>,
+        "render_adx" => typed::<RenderAdxInput>,
+        "encode_adx" => typed::<EncodeAdxInput>,
+        "export_nds_sample" => typed::<ExportNdsSampleInput>,
+        "replace_nds_wave" => typed::<ReplaceNdsWaveInput>,
         "load_instrument_source" => typed::<LoadInstrumentSourceInput>,
         "export_instrument_source" => typed::<ExportInstrumentSourceInput>,
         "export_instrument_bank" => typed::<ExportInstrumentBankInput>,
@@ -333,6 +366,9 @@ impl Service {
         } else {
             arguments
         };
+        if let Some(response) = self.route(tool, &arguments) {
+            return response;
+        }
         let request_hash = sha256_hex(canonical_arguments(tool, &arguments).to_string().as_bytes());
         // Jobs recorded before a tool gained typed canonicalization hashed raw arguments.
         let raw_hash = sha256_hex(arguments.to_string().as_bytes());
@@ -376,9 +412,18 @@ impl Service {
             if let Some(mut replay) = self.replay(tool, &job_id, &[&request_hash, &raw_hash]) {
                 if tool == "present_review"
                     && replay.status == Status::Ok
-                    && let Some(project) = arguments.get("project").and_then(Value::as_str)
+                    && let Some(owner) = arguments
+                        .get("project")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            arguments
+                                .get("source")
+                                .and_then(Value::as_str)
+                                .map(source_review::source_owner)
+                        })
                 {
-                    self.refresh_review_url(&mut replay, project);
+                    self.refresh_review_url(&mut replay, &owner);
                 }
                 return replay;
             }
@@ -469,9 +514,25 @@ impl Service {
             "copy_fm_patch" => self.copy_fm_patch(parse(arguments)?),
             "export_fm_bank" => self.export_fm_bank(parse(arguments)?),
             "render_fm_patch" => self.render_fm_patch(parse(arguments)?),
+            "load_vab_bank" => self.load_vab_bank(parse(arguments)?),
+            "inspect_vab_bank" => self.inspect_vab_bank(parse(arguments)?),
+            "replace_vab_sample" => self.replace_vab_sample(parse(arguments)?),
+            "export_vab_bank" => self.export_vab_bank(parse(arguments)?),
+            "render_vab_tone" => self.render_vab_tone(parse(arguments)?),
+            "load_psx_sequence" => self.load_psx_sequence(parse(arguments)?),
+            "inspect_psx_sequence" => self.inspect_psx_sequence(parse(arguments)?),
+            "export_psx_sequence" => self.export_psx_sequence(parse(arguments)?),
+            "render_psx_sequence" => self.render_psx_sequence(parse(arguments)?),
             "inspect_vgm" => self.inspect_vgm(parse(arguments)?),
             "render_psg" => self.render_psg(parse(arguments)?),
             "transform_vgm" => self.transform_vgm(parse(arguments)?),
+            "inspect_adx" => self.inspect_adx(parse(arguments)?),
+            "render_adx" => self.render_adx(parse(arguments)?),
+            "encode_adx" => self.encode_adx(parse(arguments)?),
+            "rank_adx_loops" => self.rank_adx_loops(parse(arguments)?),
+            "inspect_nds_sound" => self.inspect_nds_sound(parse(arguments)?),
+            "export_nds_sample" => self.export_nds_sample(parse(arguments)?),
+            "replace_nds_wave" => self.replace_nds_wave(parse(arguments)?),
             "load_instrument_source" => self.load_instrument_source(parse(arguments)?),
             "inspect_instrument_source" => self.inspect_instrument_source(parse(arguments)?),
             "export_instrument_source" => self.export_instrument_source(parse(arguments)?),
@@ -536,7 +597,20 @@ impl Service {
             info.midi_source = Some(crate::midi::MidiSource {
                 sha256: hash.into(),
                 bytes,
+                declared_ends: None,
+                legacy_declared_ends: Some(false),
             });
+        }
+        if let Some(source) = &mut info.midi_source
+            && source.declared_ends.is_some()
+            && source.legacy_declared_ends.is_none()
+            && let Some(root) = store
+                .reader()
+                .revisions(project)?
+                .into_iter()
+                .find(|r| r.parent.is_none())
+        {
+            crate::midi::resolve_declared_projection(source, &root.composition);
         }
         Ok((info, settings))
     }

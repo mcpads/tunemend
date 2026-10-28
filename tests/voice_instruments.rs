@@ -853,6 +853,14 @@ fn check_project_counts_chip_instrument_releases_against_the_voice_budget() {
     let plain = check(&mut s, "r1", two.clone(), None);
     assert_eq!(plain["passed"], true, "{plain}");
     assert!(!plain["checked"].to_string().contains("release"));
+    // A pass still reports its peak and that no release tail was counted.
+    assert_eq!(plain["peak_simultaneous_notes"]["count"], 2, "{plain}");
+    assert!(
+        plain["unchecked"]
+            .to_string()
+            .contains("no voice with notes has a chip instrument"),
+        "{plain}"
+    );
     assert_eq!(
         ok(
             &mut s,

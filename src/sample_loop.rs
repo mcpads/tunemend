@@ -16,6 +16,9 @@ pub const ROOT_TOLERANCE_CENTS: f64 = 10.0;
 /// Level changes across the seam larger than this are reported.
 pub const LEVEL_TOLERANCE_DB: f64 = 1.0;
 
+/// Pitch tracking is optional tone analysis, not a bound on sample conversion.
+pub const MAX_PITCH_SAMPLES: usize = 131072;
+
 /// The fundamental of a steady loop traversal and its pitch track.
 pub struct Sustain {
     /// Median of the voiced windows' unrounded frequencies.
@@ -27,7 +30,7 @@ pub struct Sustain {
 /// looped sustain sounds. `None` when fewer than half the windows are voiced
 /// or the rate is too low for the default search range.
 pub fn sustain(body: &[i32], rate: u32) -> Option<Sustain> {
-    if body.is_empty() {
+    if body.is_empty() || body.len() > MAX_PITCH_SAMPLES {
         return None;
     }
     let settings = PitchSettings {
@@ -138,7 +141,12 @@ pub fn diagnostics(
         }
         None => {
             out["fundamental_hz"] = Value::Null;
-            flags.push("no stable fundamental in the looped sustain (fewer than half its pitch windows are voiced); period measures are omitted".into());
+            if body.len() > MAX_PITCH_SAMPLES {
+                out["pitch_analysis"] = json!({"status":"not_run", "reason":"loop exceeds bounded tone analysis", "max_samples":MAX_PITCH_SAMPLES});
+                flags.push("pitch and period measures are omitted for this long loop; seam and level measurements cover the decoded loop".into());
+            } else {
+                flags.push("no stable fundamental in the looped sustain (fewer than half its pitch windows are voiced); period measures are omitted".into());
+            }
         }
     }
     let largest_inside = stream[loop_start..first_pass]

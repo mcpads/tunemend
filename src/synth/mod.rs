@@ -18,6 +18,9 @@
 //!
 //! Behaviour summary:
 //!
+//! - Each Note On is a separate instance of its key; a Note Off ends the
+//!   earliest instance of that channel and key still held (first in, first
+//!   out), as the MIDI 1.0 note model allows repeated Note Ons of one key.
 //! - Every zone matching a note's key and velocity starts one voice. Sample
 //!   playback uses 4-point Catmull–Rom interpolation; loop modes 0/2 (none),
 //!   1 (continuous) and 3 (until release, then to the sample end).
@@ -149,6 +152,9 @@ pub struct Synthesizer {
     channels: Vec<Channel>,
     voices: Vec<Voice>,
     next_note: u64,
+    /// Note instances still keyed down, per channel and key, earliest
+    /// first; each Note Off ends the earliest one.
+    keyed: Vec<std::collections::VecDeque<u64>>,
     reverb: ReverbTank,
     chorus: Chorus,
     reverb_send: Vec<f32>,
@@ -170,6 +176,7 @@ impl Synthesizer {
             channels: (0..16).map(Channel::new).collect(),
             voices: Vec::new(),
             next_note: 0,
+            keyed: vec![std::collections::VecDeque::new(); 16 * 128],
             reverb: ReverbTank::new(REVERB_ROOM_SIZE_PERCENT, REVERB_DAMPING_PERCENT, rate),
             chorus: Chorus::new(rate),
             reverb_send: vec![0.0; BLOCK],
@@ -210,11 +217,12 @@ impl Synthesizer {
         if velocity == 0 {
             return self.note_off(channel, key);
         }
+        let note = self.next_note;
+        self.next_note += 1;
+        self.keyed[usize::from(channel) * 128 + usize::from(key)].push_back(note);
         let Some(preset) = self.channels[usize::from(channel)].preset else {
             return;
         };
-        let note = self.next_note;
-        self.next_note += 1;
         let regions = self.font.regions(preset, key, velocity.min(127));
         for region in regions {
             let class = region.generators[57];
@@ -265,11 +273,18 @@ impl Synthesizer {
         }
     }
 
+    /// Ends the earliest instance of the key still held on the channel.
+    /// Repeated Note Ons of one key are separate instances (MIDI 1.0), so
+    /// stacked notes release one at a time, first in, first out.
     pub fn note_off(&mut self, channel: u8, key: u8) {
         let (channel, key) = (channel & 15, key & 127);
+        let Some(note) = self.keyed[usize::from(channel) * 128 + usize::from(key)].pop_front()
+        else {
+            return;
+        };
         let sustain = self.channels[usize::from(channel)].sustain();
         for voice in &mut self.voices {
-            if voice.channel == channel && voice.key == key && voice.held {
+            if voice.note == note && voice.held {
                 voice.held = false;
                 if !sustain && !voice.sostenuto {
                     voice.release();
@@ -341,9 +356,13 @@ impl Synthesizer {
                 let c = &mut self.channels[channel];
                 c.rpn = Some((c.controllers[101], c.controllers[100]));
             }
-            120 => self.voices.retain(|v| v.channel != number),
+            120 => {
+                self.voices.retain(|v| v.channel != number);
+                self.unkey(channel);
+            }
             121 => self.reset_controllers(channel),
             123..=127 => {
+                self.unkey(channel);
                 for voice in &mut self.voices {
                     if voice.channel == number && voice.held {
                         voice.held = false;
@@ -356,6 +375,13 @@ impl Synthesizer {
             _ => {}
         }
         self.touch(number);
+    }
+
+    /// Forgets the keyed instances of a channel whose notes were all ended.
+    fn unkey(&mut self, channel: usize) {
+        for keyed in &mut self.keyed[channel * 128..(channel + 1) * 128] {
+            keyed.clear();
+        }
     }
 
     fn data_entry(&mut self, channel: usize, msb: bool, value: u8) {

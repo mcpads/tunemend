@@ -130,7 +130,7 @@ impl Service {
             Default::default()
         };
         let report = check_profile(info.timebase, &revision.composition, &profile, &releases);
-        let summary = if report.passed {
+        let mut summary = if report.passed {
             format!("{} passes `{}`", revision.id, profile.name)
         } else {
             format!(
@@ -140,6 +140,12 @@ impl Service {
                 profile.name
             )
         };
+        if let Some(peak) = &report.peak_simultaneous_notes {
+            summary.push_str(&format!(
+                "; at most {} notes at once, first at {}",
+                peak.count, peak.at
+            ));
+        }
         Ok(ToolResponse::ok(
             summary,
             json!({"revision": revision.id, "report": report}),
@@ -422,6 +428,18 @@ const CAPABILITY_SECTIONS: &[(&str, &str)] = &[
         "OPN FM banks: tools, layouts, preservation and render_fm_patch audition",
     ),
     (
+        "adx_streams",
+        "CRI ADX streams: inspect_adx, render_adx, rank_adx_loops and encode_adx; variants, arithmetic, loops and refusals",
+    ),
+    (
+        "vab_banks",
+        "PlayStation VAB banks: loading, fields, refusals, sample replacement and SPU voice audition",
+    ),
+    (
+        "psx_sequences",
+        "PlayStation SEQ/SEP sequences: loading, events, loops, VAB binding, MIDI export and SPU sequence audition",
+    ),
+    (
         "vgm_mixing",
         "how render_psg mixes several chips of one VGM",
     ),
@@ -452,6 +470,10 @@ const CAPABILITY_SECTIONS: &[(&str, &str)] = &[
     (
         "wonderswan",
         "WonderSwan sound unit model: clocks, VGM support, inputs, limits and model scope",
+    ),
+    (
+        "nds_sound",
+        "Nintendo DS SDAT/SWAR/SWAV/SBNK/STRM: inspection, decoding, export and SWAV replacement",
     ),
     (
         "observations",
@@ -554,14 +576,16 @@ pub(super) fn full_capabilities() -> Value {
                 "data": "every channel event, metadata payload, SysEx, escape event, extension chunk and original byte is retained; no note pairing or target mapping is required",
                 "identity": "immutable content hashes; containers retain all bytes and child offsets; duplicate streams retain distinct ranges",
                 "inspection": "paged source events in original order, exact encoded byte ranges, and paged raw bytes",
-                "projection": "import_midi is optional; a projection diagnostic does not mean source loading failed"
+                "projection": "import_midi is optional; a projection diagnostic does not mean source loading failed",
+                "playback": "render_preview with source and destination plays SMF 0/1 or RMID, or one SMF type 2 sequence chosen with sequence, without note pairing: PPQ/SMPTE, overlapping or unreleased notes and shared channel controls. Each MIDI port (FF 21; port 0 before a track's first) is an independent reference receiver, up to 16; outputs sum in port order. A type 2 sequence plays alone on its own tempo map; others are never merged. Exports unchanged original, float32 WAV and report (receivers and sequence when relevant). One full pass or tick excerpt with preroll, at most 1800 seconds and 80 million preroll frames. Unsupported audible messages (including later GM resets on a receiver, poly pressure and CC32) refuse at their event location, as do differing device names and malformed track counts; load_midi preview.source_diagnostics reports the same. Transport releases notes/pedals on every receiver at the selected end; this does not modify MIDI. Optional lead_in_ms (1–10000) places silence before the first sample, which marks subtract. Optional gain_db (-120.0–12.0) scales the float WAV for headroom; the response's headroom suggests a value when samples exceed full scale, and present_review warns about clipping renders. With keep_for_review the WAV is also kept as a source-render-N record of that source (no project or revision), which present_review and read_feedback accept with source; marks map to source ticks and held retained event IDs, and a project imported from the same source carries them in its bundle source_reviews section with source-renders/ WAVs."
             },
             "midi_import": {
                 "accepted": ["SMF type 0 and 1 with PPQ timing", "note on/off and note-on velocity 0", "tempo, time and key signatures", "markers, text, cue points, lyrics, copyright, track names", "program change, CC1 modulation, CC7 volume, CC10 pan, CC11 expression, CC91 reverb, CC93 chorus", "pitch bend and RPN 0 bend range in whole semitones"],
-                "blocked": ["type 2 and SMPTE timing", "the same key restarting on a channel while it sounds", "unpaired or unreleased notes", "data entry outside whole-semitone RPN 0", "conflicting tempos across tracks or meters at one tick", "channel controls shared by several tracks", "events routed to multiple MIDI ports"],
-                "retained_only": ["unmodeled control lanes, aftertouch and SysEx (preview support checked separately)", "single-port routing, channel prefix, external SMPTE synchronization offset and opaque metadata", "same-track same-tick controls and tempos (projection shows final value)", "terminal controls outside the editable timeline"],
+                "blocked": ["type 2 and SMPTE timing", "unsupported RPN data entry", "conflicting tempos across tracks or meters at one tick", "implicit receiver remapping"],
+                "event_binding": "stacked onsets pair first in, first out per track, port, channel and key; unmatched events remain in source unless a supported declared_ends policy is selected; scoped controls protect every voice on the same port and channel",
+                "retained_only": ["unmodeled control lanes, aftertouch and SysEx (preview support checked separately)", "port events (routing is preserved), channel prefix, external SMPTE synchronization offset and opaque metadata", "same-track same-tick controls and tempos (projection shows final value)", "terminal controls and tempos outside the editable timeline"],
                 "inspection": "analyze_midi reports source identity, editable and retained data, import blockers and preview limits without creating a project",
-                "preview": "single MIDI receiver; initial broadcast GM1/GM2 resets before channel setup, channel pressure and CC20..31 SoundFont modulators supported; custom game controller meanings and later SysEx resets are not inferred",
+                "preview": "up to 16 independent MIDI port receivers; initial broadcast GM1/GM2 resets before channel setup on each receiver, channel pressure and CC20..31 SoundFont modulators supported; custom game controller meanings and later SysEx resets are not inferred",
                 "preservation": "original bytes, unknown events and same-tick order survive import/export; compare_midi verifies results",
                 "assumed_and_reported": ["120 BPM when no tempo is at tick 0", "±2 semitone bend range before RPN 0"],
             },
@@ -648,13 +672,14 @@ pub(super) fn full_capabilities() -> Value {
             "sample_conversion": {
                 "tools": ["prepare_sample", "inspect_sample", "export_sample"],
                 "input": "saved original byte slice (raw or RIFF/WAVE) or native BRR bank slot; loading is independent",
-                "wav": {"formats": "integer PCM 8/16/24/32-bit and IEEE float 32/64-bit, plain or WAVE_FORMAT_EXTENSIBLE, 1..32 channels, 8 MiB", "channels": "wav.channel or wav.downmix=mean (channel_downmix)", "reduction": "rounded half away from zero to PCM16; differences are bit_depth_reduction", "rate": "sample_rate must equal the header unless wav.reinterpret_rate (rate_reinterpreted)", "smpl": "loop points and root reported; used only with wav.smpl_loop / wav.smpl_root", "unknown_chunks": "listed, retained byte-exact, not interpreted"},
+                "wav": {"formats": "integer PCM 8/16/24/32-bit and IEEE float 32/64-bit, plain or WAVE_FORMAT_EXTENSIBLE, 1..32 channels, 64 MiB", "channels": "wav.channel or wav.downmix=mean (channel_downmix)", "reduction": "rounded half away from zero to PCM16; differences are bit_depth_reduction", "rate": "sample_rate must equal the header unless wav.reinterpret_rate (rate_reinterpreted)", "smpl": "loop points and root reported; used only with wav.smpl_loop / wav.smpl_root", "unknown_chunks": "listed, retained byte-exact, not interpreted"},
                 "tuning": "optional root note and cents recorded; BRR targets report the 14-bit S-DSP pitch register round(rate * 4096 / 32000) and in-tune values",
+                "gain": "optional gain_db (-96..24, non-zero) scales the decoded PCM16 stream at the source rate, before resampling and encoding: x * 10^(dB/20) rounded half away from zero, clamped; reported as gain with clipped samples, peaks and measured level change",
                 "resampling": "optional target_sample_rate; deterministic Kaiser-windowed sinc (beta 9, 32 zero crossings, cutoff 0.9 of lower Nyquist), reported as resampled; preserved loops must scale to whole and BRR-aligned samples",
                 "codec": "built in (S-DSP integer BRR decoding, greedy BRR encoding; documented SPU ADPCM decoding, per-block filter/shift search); optional trusted external script with the same JSON protocol, snapshotted",
                 "loop_policies": {"finite": "bake 0..16 additional traversals into a one-shot", "preserve": "keep the loop; BRR targets need 16-sample alignment and restart with filter 0; first pass plus one traversal compared, with difference locations; previews hold that stream with a smpl loop"},
-                "formats": ["brr", "u8", "s8", "s16le", "s16be", "psx_adpcm", "vag"],
-                "source_formats": ["brr", "u8", "s8", "s16le", "s16be", "psx_adpcm", "vag", "wav"],
+                "formats": ["brr", "u8", "s8", "s16le", "s16be", "psx_adpcm", "vag", "md_dac4"],
+                "source_formats": ["brr", "u8", "s8", "s16le", "s16be", "psx_adpcm", "vag", "md_dac4", "wav"],
                 "variants": {
                     "snes_brr": {"formats": ["brr"], "block": "9 bytes, 16 samples; filters 0-3; end and loop flags on the last block; loop address from the bank or loop_offset", "decoder": "S-DSP integer arithmetic"},
                     "psx_spu_adpcm": {
@@ -669,9 +694,18 @@ pub(super) fn full_capabilities() -> Value {
                         "tuning": "SPU pitch register round(rate * 4096 / 44100), 1..0x4000",
                         "changes": ["reserved_shift_interpreted", "flag_bits_not_carried", "rate_reinterpreted"],
                         "authority": "public psx-spx documentation; a black-box FFmpeg 9 adpcm_psx decode agrees exactly on filter-0 blocks but rounds predictions differently; no SPU hardware or emulator comparison"
+                    },
+                    "md_dac_packed4": {
+                        "formats": ["md_dac4"],
+                        "layout": "headerless; two DAC values per byte, each nibble the upper four bits of the 8-bit YM2612 DAC value (lower bits zero); md_dac.nibble_order high_first or low_first is required",
+                        "decoder": "linear: pcm16 = (nibble - 8) * 4096; a u8 target gives the 8-bit DAC values exactly",
+                        "encoder": crate::md_dac::QUANTIZATION_RULE,
+                        "loops": "the format holds none; preserve needs loop_offset (a slice byte) and a target loop on whole bytes; target_loop_offset is reported, not written",
+                        "rate": "no rate field; the driver's write timing sets it, so sample_rate is declared",
+                        "authority": "an observed reading of one driver family (black-box comparison with emulator recordings); the DAC register itself is documented as 8-bit data written by software timing"
                     }
                 },
-                "limits": "mono samples, explicit rate, 131072 decoded samples, at most 16 additional loop traversals; no native insertion or playback",
+                "limits": "mono samples, explicit rate, 8388608 decoded samples including loop expansion, raw slices up to 16 MiB, WAV up to 64 MiB; tone pitch analysis only for loops up to 131072 samples; at most 16 additional loop traversals; no native insertion or playback",
                 "preservation": "exact original retained; codec reports sample differences, padding, finite loop baking, resampling and WAV reductions; export requires exact change selection"
             },
             "observations": {
@@ -697,6 +731,39 @@ pub(super) fn full_capabilities() -> Value {
                     "context": "chip, clock and pan are declared; prescaler 6, disabled LFO, AMS/PMS 0, all operators keyed and SSG-EG refusal are reported defaults",
                     "model": crate::opn::model_scope(false)
                 }
+            },
+            "vab_banks": {
+                "family": "psx_vab",
+                "tools": ["load_instrument_source", "load_vab_bank", "inspect_vab_bank", "replace_vab_sample", "export_vab_bank", "render_vab_tone"],
+                "scope": crate::vab::SCOPE,
+                "inputs": "retained sources: a VH and a VB byte range, or one combined VAB range (header then body); pBAV little-endian only (VABp refused)",
+                "discovery": "load_instrument_source reports a VH (separate) or combined VAB with its header length and expected body bytes, VAB headers inside a container with their offsets, and a file named .vb as a body candidate (a VB has no header)",
+                "header": "magic, version (5, 6, 7, 0x20 documented; others reported), VAB id, total size, reserved 0x10, programs (entries with tones), tones, VAGs, master volume and pan, two bank attributes, reserved 0x1C",
+                "tables": "128 16-byte program entries; one 0x200-byte block of sixteen 32-byte tone records per program with tones, in program order; 256 16-bit VAG sizes in 8-byte units, slot 0 before VAG 1",
+                "refused": "wrong magic, a program with more than 16 tones, a program count or tone count that disagrees with the program table, a VH length other than the declared layout, a VAG count of 256 or more, a nonzero size beyond the count, regions past the body",
+                "reported": "every field with its offset, reserved and unused records, total size mismatch, body bytes after the last region, dangling VAG references, parent program mismatches, bytes after each region's loop-end block",
+                "samples": "each region decodes through the SPU ADPCM codec up to its first loop-end block (end_mute, loop or silent_loop_block); inspect_vab_bank view=samples gives the prepare_sample slice",
+                "replacement": "a sample plan (psx_adpcm or vag target) or a donor bank's region; layout fixed (default) needs the same size (a smaller region may be filled with unplayed zero blocks by accepting silent_padding), resize shifts later regions and rewrites the size entry and a matching total size; optional center note and fine tune updates; readback compares every other byte and the decoded stream",
+                "audition": crate::spu_voice::MODEL,
+                "limits": "no sound-library note, volume or pan arithmetic, vibrato or portamento, SPU RAM placement or hardware audio; SEQ/SEP sequences against a bank are in the psx_sequences section"
+            },
+            "psx_sequences": {
+                "family": "psx_seq",
+                "tools": ["load_instrument_source", "load_psx_sequence", "inspect_psx_sequence", "export_psx_sequence", "render_psx_sequence", "load_vab_bank", "load_midi"],
+                "scope": crate::psx_seq::SCOPE,
+                "inputs": "a retained source range holding a SEQ (pQES, 32-bit big-endian version 1, 15-byte header) or a SEP (pQES, 16-bit version 0, sequences with ID, header and data size); container detect, seq or sep",
+                "header": "resolution (ticks per quarter), tempo (24-bit microseconds per quarter), time signature numerator and power-of-two denominator; SEP adds sequence ID and data size; all big-endian",
+                "events": "MIDI variable-length deltas, running status (also after metas), channel messages, tempo FF 51 with three data bytes and no length byte, end of track FF 2F 00; each event with its offset, tick and running-status flag",
+                "nrpn": "CC99 20 loop start with count from the next CC6 (127 endless), CC99 30 loop end, CC99 40 + CC6 mark, CC99 tone 0..15 + CC98 attribute + CC6 value for VAB tone attributes, CC99 16 + CC98 15..19 + CC6 for reverb and delay settings; any other NRPN selection or data entry is reported as uninterpreted",
+                "refused": "wrong magic, undetected version, system messages, metas other than tempo and end of track, data bytes without status or with the high bit set, deltas over 4 bytes, missing end of track, SEP data sizes past the file",
+                "reported": "every event, undescribed controllers and NRPNs, unmatched loop ends, the end byte, bytes after end of track and trailing bytes",
+                "midi": "export_psx_sequence writes one SMF type 0 per sequence: the same deltas, statuses and data, header tempo and time signature at tick 0, optional loopStart/loopEnd markers; readback compares every event. Lists what MIDI does not hold (running status, the VAB binding, NRPN meanings, SEP layout)",
+                "binding": "inspect_psx_sequence view=binding: programs and keys played against a VAB's tone key ranges; view=binding_candidates with bank_source ranks every VAB header in a retained source by notes without a tone (headers only). The SEQ does not name its VAB and container position does not identify it; report the chosen pairing as an assumption",
+                "review": "present_review takes project renders: retain render.wav with load_instrument_source and place it as an audio clip in a one-voice project, then render_preview and present that render",
+                "audition": {"tool": "render_psx_sequence", "voices": crate::spu_sequence::SPU_VOICES, "max_seconds": crate::spu_sequence::MAX_SECONDS,
+                    "voice_overflow": ["refuse", "drop", "steal_releasing"], "overflow_report": "events, stolen, dropped, by_channel, first and last tick; the first 64 listed with truncated",
+                    "levels": "sample peak, dBFS and samples over full scale with a located warning and suggested gain_db; optional gain_db -120.0..12.0 scales the float samples", "readings": crate::spu_sequence::READINGS, "voice_model": crate::spu_voice::MODEL},
+                "limits": "no sound-library tick rate, voice priority, key/volume arithmetic, reverb, vibrato or portamento; VAB attribute NRPNs, bank select and aftertouch refuse the render; renders are reference auditions, not console audio"
             },
             "psg": {
                 "family": "sn76489",
@@ -806,7 +873,8 @@ pub(super) fn full_capabilities() -> Value {
                 "tools": ["measure_audio", "compare_audio"],
                 "inputs": "stored renders by project and render ID, or workspace WAV files: integer PCM 8/16/24/32-bit, float 32/64-bit, plain or extensible, 1-8 channels, 8-384 kHz",
                 "metrics": ["sample peak dBFS", "true peak dBTP (4x Kaiser-windowed sinc oversampling)", "RMS (mean square, full-scale sine -3.01 dB)", "BS.1770-4 integrated loudness with -70 LUFS absolute and -10 LU relative gates", "momentary (400 ms) and short-term (3 s) maxima", "EBU Tech 3342 loudness range", "DC offset", "clipped samples", "leading and trailing silence", "octave or third-octave band levels, with DC-removed shares when DC carries at least 0.1% of the power", "optional YIN fundamental frequency per window with nearest note, cents, periodicity, note segments and summary (pitch)"],
-                "comparison": "same rate and channel count; offset search up to ±2 s by normalized cross-correlation; sample differences, gain-matched residual, band level and loudness differences; optional pitch differences in cents at the found alignment",
+                "channel_selection": "optional zero-based channel on each audio input; omitted keeps all channels; file hash and format describe the complete source",
+                "comparison": "same rate and selected channel count; offset search up to ±2 s by normalized cross-correlation; sample differences, gain-matched residual, band level and loudness differences; optional pitch differences in cents at the found alignment",
                 "limits": {"wav_bytes": crate::measure::MAX_WAV_BYTES, "sample_values_per_input": crate::measure::MAX_SAMPLE_VALUES, "max_offset_seconds": crate::measure::MAX_OFFSET_SECONDS, "fft_size": crate::measure::spectrum::MAX_FFT},
                 "authority": "numbers describe the signal; they are not a listening judgment or a target-chip loudness claim"
             },
@@ -814,6 +882,8 @@ pub(super) fn full_capabilities() -> Value {
     });
     if let (Some(all), Value::Object(more)) = (capabilities.as_object_mut(), more) {
         all.extend(more);
+        all.insert("adx_streams".into(), crate::adx::capability());
     }
+    capabilities["nds_sound"] = super::nds_sound::capability();
     capabilities
 }

@@ -2,12 +2,22 @@
 
 Handle download, setup and verification yourself. Ask the person only for access or information you cannot obtain. Preserve existing MCP entries and saved work.
 
-## Select and install
+## Select a build
+
+No binary release is currently available. For an authorized development checkout,
+use [source builds](#source-builds) and record its commit. A 404 or empty release
+list means there is no installable release; do not invent a tag, use withdrawn
+assets or silently substitute development source.
+
+## Published binaries
 
 1. Inspect the host OS, CPU, MCP client and any existing installation. Read the latest published release at `https://api.github.com/repos/mcpads/tunemend/releases/latest` (or `gh release view --repo mcpads/tunemend`). Pin its tag and asset URLs for this installation.
-2. Download the matching archive and `SHA256SUMS` from that release. Verify its SHA-256 before extracting or running it. Do not use a draft or substitute development source without authorization.
+2. If a release exists, download the matching archive and `SHA256SUMS` from that release. Verify its SHA-256 before extracting or running it. Do not use a draft or substitute development source without authorization.
 
-| Host | Archive |
+The workflow defines these packaging targets; only assets and checks from the
+selected published release establish its host support.
+
+| Packaging target | Archive |
 | --- | --- |
 | macOS 26+, Apple Silicon | `tunemend-aarch64-apple-darwin.tar.gz` |
 | Linux x64, glibc 2.35+ | `tunemend-x86_64-unknown-linux-gnu.tar.gz` |
@@ -35,8 +45,8 @@ Saved work lives in `.tunemend/`. An existing `.retro-midi/` store is reused if 
 
 ## Source builds
 
-For an authorized source build, check out the selected tag from `https://github.com/mcpads/tunemend`. Install stable Rust and the host C build tools for bundled SQLite (Xcode Command Line Tools on macOS, MSVC on Windows, distribution build tools on Linux).
+For an authorized source build, use the selected checkout/commit or an existing published tag from `https://github.com/mcpads/tunemend`. Record the commit and executable hash; `--version` alone does not identify a development build. Install stable Rust and the host C build tools for bundled SQLite (Xcode Command Line Tools on macOS, MSVC on Windows, distribution build tools on Linux).
 
-On Unix, `scripts/install.sh <prefix>` builds the binary and installs the complete skill under `<prefix>/share/tunemend/skills/`. Alternatively, run `cargo build --release --locked`, install `target/release/tunemend` (`tunemend.exe` on Windows), and copy `skills/tunemend/`. Verify the installed binary and client as above. Other architectures require their own build and checks.
+On Unix, `scripts/install.sh <prefix>` builds the binary and installs the complete skill under `<prefix>/share/tunemend/skills/`. Alternatively, run `cargo build --release --locked`, install `target/release/tunemend` (`tunemend.exe` on Windows), and copy `skills/tunemend/`. For this route, compare `--version` with the checkout’s Cargo package version, not a nonexistent release tag; verify the installed client calls as above. Other architectures require their own build and checks.
 
 The reference sound source and sample codecs are built in. No DAW or extra sound download is required. The optional Compile score backend needs Python 3 and consumer-supplied encoder/template/bank inputs; see the [score reference](score-target.md).

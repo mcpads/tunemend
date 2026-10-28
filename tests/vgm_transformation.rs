@@ -342,6 +342,48 @@ fn unrepresentable_results_refuse_until_the_loss_is_accepted() {
         reentry.result["unaccepted"],
         json!(["loop_entry_state_differs"])
     );
+    // Noise rate 3 follows tone 2: a transposed tone 2 moves the noise (a
+    // loss), while a held tone 2 period keeps its value and moves nothing.
+    for (tone2, expected) in [(0x100u16, Status::Blocked), (0, Status::Blocked)] {
+        let body = [
+            0x50,
+            0xc0 | (tone2 & 15) as u8,
+            0x50,
+            (tone2 >> 4) as u8, // tone 2 period, attenuation stays 15
+            0x50,
+            0xe7, // white noise, rate 3 (tone 2)
+            0x50,
+            0xf0, // noise attenuation 0
+            0x61,
+            0x64,
+            0x00,
+            0x66,
+        ];
+        let name = format!("noise-{tone2}.vgm");
+        let noisy = load(
+            &mut service,
+            &root,
+            &name,
+            &vgm(Clocks { sn: SN, ..DEFAULT }, &body, None),
+        );
+        let refused = call(
+            &mut service,
+            "transform_vgm",
+            json!({"job_id":format!("noise-{tone2}"),"source":noisy,"copy":{"family":"sn76489","transpose_semitones":2},
+                "destination":format!("out/noise-{tone2}")}),
+            expected,
+        );
+        if tone2 == 0 {
+            // Sega parts hold the output at period 0: no byte changes and no loss.
+            assert_eq!(
+                refused.diagnostics[0].code,
+                tunemend::DiagnosticCode::EmptyEdit,
+                "{refused:?}"
+            );
+        } else {
+            assert_eq!(refused.result["unaccepted"], json!(["noise_follows_tone2"]));
+        }
+    }
     // Exactly one operation, and a family the header declares.
     call(
         &mut service,

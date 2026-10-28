@@ -669,7 +669,7 @@ fn resampling_is_a_measured_change_and_scales_preserved_loops() {
         ),
         (
             "limit",
-            json!({"target_sample_rate":192000,"sample_rate":8}),
+            json!({"target_sample_rate":192000,"sample_rate":1}),
             "sample limit",
         ),
         (

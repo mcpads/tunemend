@@ -319,6 +319,41 @@ fn ranges_and_loop_passes_follow_the_unrolled_timeline() {
         wav_frames(&root.join("out/44k/render-44100.wav")).len() as u64,
         resampled["resampled"]["target_samples"].as_u64().unwrap()
     );
+    // Resampled ranges sit on the timeline's 44100 Hz grid: adjacent ranges
+    // tile the whole render whatever native phase their start falls on.
+    let whole = wav_frames(&root.join("out/44k/render-44100.wav"));
+    assert_eq!(whole.len() as u64, total);
+    let mut tiled = Vec::new();
+    for (i, (start, end)) in [(0u64, 1000u64), (1000, 1777), (1777, total)]
+        .into_iter()
+        .enumerate()
+    {
+        // Both inner starts fall between native samples.
+        assert!(start == 0 || start * 3_579_545 % 705_600 != 0);
+        let dest = format!("out/tile-{i}");
+        let part = ok(
+            &mut service,
+            "render_psg",
+            json!({"job_id":format!("tile-{i}"),"vgm":source,"output_sample_rate":44100,
+                "range":{"start_sample":start,"end_sample":end},"destination":dest}),
+        )
+        .result;
+        let frames = wav_frames(&root.join(&dest).join("render-44100.wav"));
+        assert_eq!(frames.len() as u64, end - start);
+        assert_eq!(part["resampled"]["target_samples"], end - start);
+        // Away from the range edges (the kernel reaches about 36 outputs) the
+        // samples are the whole render's, bit for bit.
+        let edge = 64usize;
+        if frames.len() > 2 * edge {
+            let at = start as usize;
+            assert_eq!(
+                &frames[edge..frames.len() - edge],
+                &whole[at + edge..at + frames.len() - edge]
+            );
+        }
+        tiled.extend(frames);
+    }
+    assert_eq!(tiled.len(), whole.len());
     let refused = service.call(
         "render_psg",
         json!({"job_id":"bad-range","vgm":source,"range":{"start_sample":0,"end_sample":999_999},"destination":"out/bad"}),

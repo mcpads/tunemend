@@ -52,7 +52,7 @@ def probe(binary, workspace, version):
         assert responses[1]['result']['serverInfo']['version'] == version
         assert responses[1]['result']['instructions'] == Path('src/mcp_instructions.md').read_bytes().decode('utf-8')
         names = {t['name'] for t in responses[2]['result']['tools']}
-        assert {'create_project', 'edit_project', 'present_review', 'get_capabilities'} <= names
+        assert {'create_project', 'edit_project', 'present_review', 'get_capabilities', 'midi', 'sound'} <= names
         assert responses[3]['result']['structuredContent']['status'] == 'ok'
     finally:
         process.stdin.close()

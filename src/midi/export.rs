@@ -20,6 +20,7 @@ pub fn write_smf(
             timebase,
             composition,
             plan,
+            false,
             &mut Report::new("/export", &mut diagnostics),
         );
     }

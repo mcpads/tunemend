@@ -418,6 +418,143 @@ fn region_renders_equal_their_excerpts_and_source_backed_crops() {
 }
 
 #[test]
+fn levels_beyond_full_scale_are_reported_apart_from_the_encoding_clamp() {
+    let space = Workspace::new("levels");
+    let mut s = Service::new(&space.path);
+    village(&mut s);
+    // Unity gain stays below full scale: levels, no warning.
+    let quiet = ok(
+        &mut s,
+        "render_batch",
+        json!({"job_id": "quiet", "project": "village", "format": "pcm24"}),
+    );
+    let levels = &renders(&quiet)[0]["levels"];
+    assert_eq!(levels["samples_over_full_scale"], 0, "{levels}");
+    assert_eq!(levels["clamped_samples"], 0);
+    assert!(levels["sample_peak"].as_f64().unwrap() < 1.0);
+    assert!(quiet.result.get("warnings").is_none());
+    let preview = ok(
+        &mut s,
+        "render_preview",
+        json!({"job_id": "quiet-preview", "project": "village", "layout": {"kind": "full", "loop_passes": 1}}),
+    );
+    assert_eq!(preview.result["levels"]["clamped_samples"], 0);
+    assert!(preview.result.get("warnings").is_none());
+
+    ok(
+        &mut s,
+        "edit_project",
+        json!({"project": "village", "request": {"job_id": "loud", "base_revision": "r1",
+            "scope": {"voices": [], "buses": true},
+            "operations": [{"op": "set_mix", "target": {"kind": "master"}, "volume_db": 12.0}]}}),
+    );
+    let render = |s: &mut Service, job: &str, format: &str| {
+        let response = ok(
+            s,
+            "render_batch",
+            json!({"job_id": job, "project": "village", "format": format}),
+        );
+        (renders(&response)[0].clone(), response)
+    };
+    let (float, float_response) = render(&mut s, "loud-float", "float32");
+    let (pcm16, pcm16_response) = render(&mut s, "loud-pcm16", "pcm16");
+    let (pcm24, _) = render(&mut s, "loud-pcm24", "pcm24");
+    let samples = floats(&path(&float));
+    let over = samples.iter().filter(|x| x.abs() > 1.0).count();
+    let peak = samples.iter().fold(0.0f32, |p, x| p.max(x.abs()));
+    assert!(over > 0, "the +12 dB master must exceed full scale");
+
+    // Float keeps the levels: counted, not clamped, and warned about.
+    assert_eq!(float["levels"]["samples_over_full_scale"], over);
+    assert_eq!(float["levels"]["clamped_samples"], 0);
+    assert_eq!(
+        float["levels"]["sample_peak"].as_f64().unwrap(),
+        f64::from(peak)
+    );
+    let warning = &float_response.result["warnings"][0];
+    assert_eq!(warning["code"], "samples_over_full_scale");
+    assert_eq!(
+        warning["location"],
+        "/renders/0/levels/samples_over_full_scale"
+    );
+    assert!(
+        samples.iter().any(|x| x.abs() > 1.0),
+        "float is not clamped"
+    );
+
+    // Integer files clamp exactly those samples; the bytes are the
+    // documented conversion of the same float samples, nothing rescaled.
+    for (record, full_scale) in [(&pcm16, 32767), (&pcm24, 8_388_607)] {
+        assert_eq!(record["levels"]["clamped_samples"], over, "{record}");
+        assert_eq!(record["levels"]["samples_over_full_scale"], over);
+        let file = codes(&path(record));
+        let at_full_scale = file.iter().filter(|c| c.abs() >= full_scale).count();
+        assert!(at_full_scale >= over, "{at_full_scale} < {over}");
+    }
+    let expected16: Vec<i32> = samples
+        .iter()
+        .map(|x| i32::from((x.clamp(-1.0, 1.0) * 32767.0).round() as i16))
+        .collect();
+    assert_eq!(codes(&path(&pcm16)), expected16);
+    let warning = &pcm16_response.result["warnings"][0];
+    assert_eq!(warning["code"], "integer_clipping");
+    assert_eq!(warning["location"], "/renders/0/levels/clamped_samples");
+    assert!(
+        pcm16_response.summary.contains("exceed full scale"),
+        "{}",
+        pcm16_response.summary
+    );
+
+    // render_preview writes the same 16-bit bytes and reports the clamp.
+    let preview = ok(
+        &mut s,
+        "render_preview",
+        json!({"job_id": "loud-preview", "project": "village", "layout": {"kind": "full", "loop_passes": 1}}),
+    );
+    assert_eq!(
+        preview.result["render"]["sha256"],
+        pcm16["render"]["sha256"]
+    );
+    assert_eq!(preview.result["levels"]["clamped_samples"], over);
+    assert_eq!(preview.result["warnings"][0]["code"], "integer_clipping");
+    assert_eq!(
+        preview.result["warnings"][0]["location"],
+        "/levels/clamped_samples"
+    );
+}
+
+#[test]
+fn full_spans_of_a_looping_revision_report_intro_and_loop_lengths() {
+    let space = Workspace::new("loop-timing");
+    let mut s = Service::new(&space.path);
+    village(&mut s);
+    let batch = ok(
+        &mut s,
+        "render_batch",
+        json!({"job_id": "passes", "project": "village", "spans": [
+            {"kind": "full", "loop_passes": 2}, {"kind": "section", "id": "intro"}]}),
+    );
+    let preview = ok(
+        &mut s,
+        "render_preview",
+        json!({"job_id": "passes-preview", "project": "village", "layout": {"kind": "full", "loop_passes": 2}}),
+    );
+    let timing = &batch.result["spans"][0]["timing"];
+    for key in ["intro_seconds", "loop_seconds", "loop_passes"] {
+        assert_eq!(timing[key], preview.result["timing"][key], "{key}");
+    }
+    let content = timing["content_seconds"].as_f64().unwrap();
+    let parts =
+        timing["intro_seconds"].as_f64().unwrap() + 2.0 * timing["loop_seconds"].as_f64().unwrap();
+    assert!((content - parts).abs() < 1e-9, "{content} vs {parts}");
+    assert!(
+        batch.result["spans"][1]["timing"]
+            .get("loop_seconds")
+            .is_none()
+    );
+}
+
+#[test]
 fn formats_decode_to_the_renderers_samples() {
     let space = Workspace::new("formats");
     let mut s = Service::new(&space.path);

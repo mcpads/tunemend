@@ -28,6 +28,8 @@ const WAVES: [(Wave, &str); 4] = [
 ];
 
 impl Wave {
+    /// One point of a zero-mean cycle. Finite windows, envelopes and
+    /// processing can still introduce a nonzero mean or boundary steps.
     fn point(self, phase: f64) -> f64 {
         match self {
             Wave::Square => {
@@ -37,11 +39,13 @@ impl Wave {
                     -1.0
                 }
             }
+            // The ±1 pulse shifted by its mean (-0.5): same swing and
+            // harmonics, no offset.
             Wave::Pulse25 => {
                 if phase < 0.25 {
-                    1.0
+                    1.5
                 } else {
-                    -1.0
+                    -0.5
                 }
             }
             Wave::Triangle => {
@@ -51,7 +55,8 @@ impl Wave {
                     3.0 - 4.0 * phase
                 }
             }
-            Wave::Saw => 2.0 * phase - 1.0,
+            // Centred on each point's half step so the sampled cycle averages zero.
+            Wave::Saw => 2.0 * phase - 1.0 + 1.0 / CYCLE as f64,
         }
     }
 }

@@ -29,6 +29,30 @@ pub const MAX_SOURCE_BYTES: usize = 64 << 20;
 /// Most clips one revision holds.
 pub const MAX_CLIPS: usize = 1024;
 
+/// WAV amplitude interpretation, retained in the revision for reproducible renders.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipNormalization {
+    /// Preserve historical PCM16 code scaling (divide by 32767).
+    #[default]
+    Pcm16Codes,
+    /// Use normalized WAV amplitude (divide by 32768); suitable for float output.
+    WavAmplitude,
+}
+
+impl ClipNormalization {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Pcm16Codes
+    }
+
+    fn divisor(self) -> f64 {
+        match self {
+            Self::Pcm16Codes => 32767.0,
+            Self::WavAmplitude => 32768.0,
+        }
+    }
+}
+
 /// A range of a retained WAV placed on a voice's timeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +76,9 @@ pub struct AudioClip {
     pub source_end: Option<u64>,
     /// How source channels become the stereo clip signal.
     pub channels: ClipChannels,
+    /// Source amplitude convention. Omission preserves historical PCM16 code scaling.
+    #[serde(default, skip_serializing_if = "ClipNormalization::is_legacy")]
+    pub normalization: ClipNormalization,
     /// Clip gain in dB, -120.0–12.0.
     #[serde(default, skip_serializing_if = "Tenths::is_zero")]
     pub gain_db: Tenths,
@@ -108,6 +135,8 @@ pub struct ClipUpdate {
     pub source_end: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<ClipChannels>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalization: Option<ClipNormalization>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gain_db: Option<Tenths>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +393,7 @@ pub(crate) fn apply_clip_operation(
             clip.gain_db = update.gain_db.unwrap_or(clip.gain_db);
             clip.fade_in_ms = update.fade_in_ms.unwrap_or(clip.fade_in_ms);
             clip.fade_out_ms = update.fade_out_ms.unwrap_or(clip.fade_out_ms);
+            clip.normalization = update.normalization.unwrap_or(clip.normalization);
             if *clip == before {
                 report.push(
                     Code::EmptyEdit,
@@ -622,8 +652,8 @@ fn gcd(a: u64, b: u64) -> u64 {
 }
 
 /// Clip signals per voice, `length` samples long, and one report per clip
-/// that played. Values are PCM16 units / 32767, so a PCM16 source at the
-/// render rate with neutral settings writes its own values back.
+/// that played. Each clip retains its amplitude convention; omitted values
+/// preserve the historical PCM16 code scale.
 pub(crate) fn clip_signals(
     clips: &[AudioClip],
     placements: &[Placement],
@@ -678,7 +708,7 @@ pub(crate) fn clip_signals(
                 }
                 let n = (placement.at + k as i64) as usize;
                 for (side, values) in signal.iter_mut().zip(&prepared.stereo) {
-                    let value = values[k as usize] * g / f64::from(i16::MAX);
+                    let value = values[k as usize] * g / clip.normalization.divisor();
                     side[n] = (f64::from(side[n]) + value) as f32;
                 }
             }
@@ -693,6 +723,8 @@ pub(crate) fn clip_signals(
             "source_file": source.facts, "channels": clip.channels,
             "source_range": {"start": clip.source_start, "end": clip.source_end.unwrap_or(source.frames())},
             "rate": prepared.report, "gain_db": clip.gain_db,
+            "source_normalization": {"pcm16_units_per_full_scale": clip.normalization.divisor(),
+                "gain_from_normalized_wav": 32768.0 / clip.normalization.divisor()},
             "fades": {"curve": "linear in amplitude", "fade_in_samples": fade_in, "fade_out_samples": fade_out},
             "placements": written}));
     }
@@ -716,6 +748,7 @@ mod tests {
             gain_db: Tenths(0),
             fade_in_ms: Tenths(0),
             fade_out_ms: Tenths(0),
+            normalization: ClipNormalization::default(),
         }
     }
 

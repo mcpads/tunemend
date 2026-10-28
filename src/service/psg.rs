@@ -7,8 +7,9 @@ use crate::gb_apu::GbConfig;
 use crate::huc6280::PceConfig;
 use crate::nes_apu::{MemoryBlock, NesConfig, NesRegion};
 use crate::psg::{
-    MAX_EVENTS, MAX_RENDER_SECONDS, PsgNote, PsgPort, PsgVariant, PsgWriteInput, check_clock,
-    explicit_writes, note_writes, resample_divided, resample_exact,
+    MAX_EVENTS, MAX_RENDER_SECONDS, PsgNote, PsgPort, PsgVariant, PsgWriteInput, VgmSpan,
+    check_clock, explicit_writes, note_writes, resample_divided, resample_exact, resample_span,
+    resample_span_pcm16,
 };
 use crate::sound_chip::{ChipModel, ChipWrite, Decoder, Target, mix};
 use crate::vgm::{Kind, VGM_RATE, Vgm, VgmError};
@@ -320,6 +321,10 @@ struct Plan {
     tail: Option<(f64, u64)>,
     /// VGM header volume modifier gain, when applied.
     gain: Option<f64>,
+    /// VGM: the rendered part of the timeline in VGM samples, start..end
+    /// (the end moves to the cut when a tail renders). Resampled output
+    /// sits on the timeline's grid; explicit writes have none.
+    span: Option<(u64, u64)>,
 }
 
 /// Decoders for inspection, from the header where it is valid.
@@ -1091,6 +1096,7 @@ impl Service {
             report,
             tail: tail.map(|(seconds, _)| (seconds, range.end_sample)),
             gain,
+            span: Some((range.start_sample, range.end_sample)),
         })
     }
 
@@ -1389,6 +1395,7 @@ impl Service {
             report,
             tail: None,
             gain: None,
+            span: None,
         })
     }
 
@@ -1448,6 +1455,7 @@ impl Service {
             );
         }
         let mut chips = plan.chips;
+        let mut span = plan.span;
         if let Some((requested, range_end)) = plan.tail {
             // The latest moment after which every chip's output stays constant.
             let mut settled_at = 0u64;
@@ -1473,6 +1481,9 @@ impl Service {
             } else {
                 cut
             };
+            if let Some(span) = &mut span {
+                span.1 = cut;
+            }
             for (chip, rendered) in chips.iter_mut().zip(&mut renders) {
                 let end = vgm_to(cut, chip.clock, chip.model.frame_divider()).max(chip.start);
                 rendered
@@ -1578,8 +1589,20 @@ impl Service {
                     names["native"] = json!("render.wav");
                 }
                 if let Some(target) = input.output_sample_rate {
-                    let (frames, mut resampled) =
-                        resample_divided(&rendered.frames, chip.clock, divider, target);
+                    let (frames, mut resampled) = match span {
+                        Some((start, end)) => resample_span_pcm16(
+                            &rendered.frames,
+                            chip.clock,
+                            divider,
+                            target,
+                            VgmSpan {
+                                start,
+                                end,
+                                first_native: chip.start,
+                            },
+                        ),
+                        None => resample_divided(&rendered.frames, chip.clock, divider, target),
+                    };
                     let name = format!("render-{target}.wav");
                     resampled["file"] = json!(name);
                     files.push((name.clone(), crate::opn::wav16(target, &frames)));
@@ -1598,8 +1621,20 @@ impl Service {
                         chip.model.tick_divider()
                     ));
                 }
-                let (exact, resampled) =
-                    resample_exact(&rendered.frames, chip.clock, divider, target);
+                let (exact, resampled) = match span {
+                    Some((start, end)) => resample_span(
+                        &rendered.frames,
+                        chip.clock,
+                        divider,
+                        target,
+                        VgmSpan {
+                            start,
+                            end,
+                            first_native: chip.start,
+                        },
+                    ),
+                    None => resample_exact(&rendered.frames, chip.clock, divider, target),
+                };
                 mixed_sources.push(exact);
                 let mut entry = chip.chip;
                 entry["id"] = json!(chip.id);
@@ -1626,7 +1661,7 @@ impl Service {
             names["resampled"] = json!(name);
             report["mix"] = mix_report;
             report["resampled"] = json!({"file":name,"target_rate":target,"target_samples":frames.len(),
-                "alignment":"each chip's output sample m sits at its own range start plus m/rate; range starts differ by less than one native sample"});
+                "alignment":"every chip's output sample m sits at the range start plus m/rate on the VGM timeline"});
             let mut models = serde_json::Map::new();
             for (family, scope, _) in &chip_reports {
                 models.insert((*family).to_owned(), scope.clone());

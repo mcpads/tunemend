@@ -83,6 +83,31 @@ pub struct ProfileReport {
     /// Constraints the profile does not declare, so nothing was checked.
     pub unchecked: Vec<String>,
     pub violations: Vec<Violation>,
+    /// With `max_simultaneous_notes`: the most notes counted at once, and
+    /// where that count is first reached, whether or not it passes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peak_simultaneous_notes: Option<Peak>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct Peak {
+    pub count: usize,
+    /// Position in the timebase unit of the start that first reaches it.
+    pub at: u64,
+    pub notes: Vec<String>,
+}
+
+/// Raises `peak` when `sounding` exceeds it after a note starts at `at`.
+fn raise_peak(peak: &mut Option<Peak>, at: u64, sounding: &[&Note]) {
+    if peak.as_ref().is_none_or(|p| sounding.len() > p.count) {
+        let mut notes: Vec<&Note> = sounding.to_vec();
+        notes.sort_by_key(|n| (n.start, n.id.clone()));
+        *peak = Some(Peak {
+            count: sounding.len(),
+            at,
+            notes: notes.iter().map(|n| n.id.clone()).collect(),
+        });
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -159,6 +184,7 @@ pub fn check_profile(
     let mut checked = Vec::new();
     let mut unchecked = Vec::new();
     let mut violations = Vec::new();
+    let mut peak = None;
 
     if let Some(max) = profile.max_voices {
         checked.push(format!("at most {max} voices"));
@@ -195,7 +221,11 @@ pub fn check_profile(
                     &composition.notes,
                     budget,
                     "max_simultaneous_notes",
+                    &mut peak,
                 ));
+                unchecked.push(
+                    "release tails: no voice with notes has a chip instrument, so each note counts only until it ends; releases overlapping later notes, including across the loop return, are not checked".into(),
+                );
             } else {
                 checked.push(format!(
                     "notes of chip-instrument voices count until their release ends: {}",
@@ -209,7 +239,13 @@ pub fn check_profile(
                         .collect::<Vec<_>>()
                         .join("; ")
                 ));
-                violations.extend(sounding_violations(timebase, composition, &known, budget));
+                violations.extend(sounding_violations(
+                    timebase,
+                    composition,
+                    &known,
+                    budget,
+                    &mut peak,
+                ));
                 if composition
                     .voices
                     .iter()
@@ -267,7 +303,7 @@ pub fn check_profile(
                 by_voice.entry(&note.voice).or_default().push(note.clone());
             }
             for notes in by_voice.values() {
-                violations.extend(polyphony_violations(notes, 1, "monophonic"));
+                violations.extend(polyphony_violations(notes, 1, "monophonic", &mut None));
             }
         }
     }
@@ -342,6 +378,7 @@ pub fn check_profile(
         checked,
         unchecked,
         violations,
+        peak_simultaneous_notes: peak,
     }
 }
 
@@ -355,6 +392,7 @@ fn sounding_violations(
     composition: &Composition,
     releases: &BTreeMap<&str, &VoiceRelease>,
     budget: u32,
+    peak: &mut Option<Peak>,
 ) -> Vec<Violation> {
     let at = |tick: u64| seconds_at(timebase, composition, Rational::from_integer(tick.into()));
     // Each note's start, the end of its sound, and its own end.
@@ -400,6 +438,8 @@ fn sounding_violations(
     for (t, starts, i) in edges {
         if starts {
             sounding.push(i);
+            let notes: Vec<&Note> = sounding.iter().map(|&s| spans[s].3).collect();
+            raise_peak(peak, spans[i].3.start, &notes);
         } else {
             sounding.retain(|&s| s != i);
         }
@@ -430,7 +470,12 @@ fn sounding_violations(
 }
 
 /// Reports each stretch where more than `budget` notes sound together.
-fn polyphony_violations(notes: &[Note], budget: u32, rule: &str) -> Vec<Violation> {
+fn polyphony_violations(
+    notes: &[Note],
+    budget: u32,
+    rule: &str,
+    peak: &mut Option<Peak>,
+) -> Vec<Violation> {
     let mut edges: Vec<(u64, bool, &Note)> = notes
         .iter()
         .flat_map(|n| [(n.start, true, n), (n.start + n.duration, false, n)])
@@ -443,6 +488,7 @@ fn polyphony_violations(notes: &[Note], budget: u32, rule: &str) -> Vec<Violatio
     for (at, starts, note) in edges {
         if starts {
             sounding.push(note);
+            raise_peak(peak, at, &sounding);
         } else {
             sounding.retain(|n| n.id != note.id);
         }

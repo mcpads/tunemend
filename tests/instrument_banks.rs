@@ -127,6 +127,22 @@ fn capacity_aliases_reserved_slots_and_runtime_mismatch_are_actionable() {
             .unwrap()
             .contains("reserved")
     );
+    // A slot whose sample lives in a resident sample module is shared context:
+    // replacement names the module boundary instead of a bare range error.
+    let mut resident = assets(false);
+    resident.insert("sample-0.bin".into(), module(0xb000, &brr(4, 0x56)));
+    resident.get_mut("bank.bin").unwrap()[4 + 23 * 4..4 + 23 * 4 + 4]
+        .copy_from_slice(&[0, 0xb0, 0, 0xb0]);
+    let outside = InstrumentBank::new(tight.clone(), resident).unwrap();
+    assert_eq!(outside.sample(23).unwrap().bytes, brr(4, 0x56));
+    let refusal = outside
+        .copy_from(&donor, &settings(), 23, SamplePlacement::Replace)
+        .err()
+        .unwrap();
+    assert!(
+        refusal.contains("outside the bank module") && refusal.contains("0xb000"),
+        "{refusal}"
+    );
     let mut shared = assets(false);
     shared.get_mut("bank.bin").unwrap()[4 + 21 * 4..4 + 21 * 4 + 4]
         .copy_from_slice(&[0, 0x46, 27, 0x46]);

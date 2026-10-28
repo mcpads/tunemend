@@ -166,16 +166,20 @@ fn cli_and_mcp_give_the_same_results() {
         .collect();
     assert_eq!(
         names,
-        tunemend::service::tool_definitions()
+        tunemend::service::surface_definitions()
             .iter()
             .map(|t| t.name)
             .collect::<Vec<_>>()
     );
-    assert!(names.contains(&"present_review") && names.contains(&"read_feedback"));
+    assert!(names.contains(&"present_review") && names.contains(&"feedback"));
 
     for (index, (tool, input)) in steps().into_iter().enumerate() {
         let (cli, exit) = call_cli(&cli_space, tool, &input);
-        let answer = mcp.request("tools/call", json!({"name": tool, "arguments": input}));
+        let (name, arguments) = match tunemend::service::operation_group(tool) {
+            Some(group) => (group, json!({"operation":tool,"arguments":input})),
+            None => (tool, input),
+        };
+        let answer = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
         let structured = answer["result"]["structuredContent"].clone();
         let text: Value =
             serde_json::from_str(answer["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -265,7 +269,11 @@ fn present_review_through_mcp_starts_a_listening_screen() {
         "render_preview",
         json!({"job_id": "render", "project": "village", "layout": {"kind": "full", "loop_passes": 1}}),
     )]) {
-        let answer = mcp.request("tools/call", json!({"name": tool, "arguments": input}));
+        let (name, arguments) = match tunemend::service::operation_group(tool) {
+            Some(group) => (group, json!({"operation":tool,"arguments":input})),
+            None => (tool, input),
+        };
+        let answer = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
         assert_eq!(answer["result"]["isError"], false, "{answer}");
     }
     let show = json!({"name": "present_review", "arguments": {"job_id": "show", "project": "village", "title": "Café village", "renders": [{"render": "render-1", "label": "First draft"}]}});
@@ -323,4 +331,94 @@ fn present_review_through_mcp_starts_a_listening_screen() {
     drop(resumed);
     drop(old_port);
     let _ = std::fs::remove_dir_all(space);
+}
+
+/// Runs the binary with standard output connected to a pipe whose reader is
+/// already closed, and returns its exit code and standard error.
+fn run_with_closed_stdout(args: &[&str], input: Option<&str>) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut child = Command::new(BINARY)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_closed_output_reader_ends_every_command_without_a_panic() {
+    let dir = workspace("closed-stdout");
+    let at = dir.to_str().unwrap();
+    let commands: [(&[&str], Option<&str>); 7] = [
+        (&["tools"], None),
+        (&["schema", "edit_project"], None),
+        (&["schema", "bundle"], None),
+        (&["--help"], None),
+        (&["--version"], None),
+        (&["call", "get_capabilities", "--workspace", at], Some("{}")),
+        // A refused call still writes its response, and ends the same way.
+        (&["call", "render_preview", "--workspace", at], Some("{}")),
+    ];
+    for (args, input) in commands {
+        let (code, stderr) = run_with_closed_stdout(args, input);
+        assert_eq!(code, Some(141), "{args:?}: {stderr}");
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+    }
+
+    // An MCP client that stops reading before the initialize response, or
+    // that closes its input at once, ends the server normally.
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}});
+    let (code, stderr) = run_with_closed_stdout(
+        &["mcp", "--workspace", at],
+        Some(&format!("{initialize}\n")),
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    let (code, stderr) = run_with_closed_stdout(&["mcp", "--workspace", at], Some(""));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // After initialization the client closes its reader, then sends more.
+    let mut child = Command::new(BINARY)
+        .args(["mcp", "--workspace", at])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, "{initialize}").unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("tunemend"), "{line}");
+    drop(reader);
+    writeln!(
+        stdin,
+        "{}\n{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    )
+    .unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let _ = std::fs::remove_dir_all(dir);
 }

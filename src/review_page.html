@@ -191,7 +191,8 @@ function render() {
     const remove = document.createElement('button');
     remove.textContent = 'Remove mark';
     remove.onclick = () => { marks.splice(index, 1); render(); scheduleSave(); };
-    li.append(chip, what, voice, remove);
+    // Source renders have no voices to single out.
+    if (it2.voices.length) li.append(chip, what, voice, remove); else li.append(chip, what, remove);
     list.appendChild(li);
   });
 }

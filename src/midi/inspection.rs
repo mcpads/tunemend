@@ -3,42 +3,71 @@
 use super::*;
 use serde_json::{Value, json};
 
-/// The current project renderer has one MIDI receiver. A declared port is
-/// harmless when every routed event uses that same receiver, including a
-/// nonzero port number. Never merge events from distinct receivers.
-pub(super) fn routing_blockers(smf: &Smf<'_>) -> Vec<Diagnostic> {
-    let mut receiver = None;
-    let mut diagnostics = Vec::new();
-    for (track, events) in smf.tracks.iter().enumerate() {
+/// Describe retained routing without merging distinct receivers.
+pub(super) fn port_routing_note(smf: &Smf<'_>) -> String {
+    let mut declared = std::collections::BTreeSet::new();
+    let mut carrying = std::collections::BTreeSet::new();
+    for events in &smf.tracks {
         let mut port = 0;
-        for (index, event) in events.iter().enumerate() {
+        for event in events {
             match event.kind {
-                TrackEventKind::Meta(MetaMessage::MidiPort(value)) => port = value.as_int(),
+                TrackEventKind::Meta(MetaMessage::MidiPort(value)) => {
+                    port = value.as_int();
+                    declared.insert(port);
+                }
                 TrackEventKind::Midi { .. }
                 | TrackEventKind::SysEx(_)
                 | TrackEventKind::Escape(_) => {
-                    if let Some(previous) = receiver {
-                        if port != previous {
-                            diagnostics.push(Diagnostic {
-                                code: Code::UnsupportedMidi,
-                                location: format!("/tracks/{track}/events/{index}"),
-                                message: format!("MIDI ports {previous} and {port} address different receivers; multi-port editing and rendering are not supported"),
-                            });
-                            return diagnostics;
-                        }
-                    } else {
-                        receiver = Some(port);
-                    }
+                    carrying.insert(port);
                 }
                 _ => {}
             }
         }
     }
-    diagnostics
+    let list = |ports: &std::collections::BTreeSet<u8>| {
+        let names: Vec<String> = ports.iter().map(u8::to_string).collect();
+        match names.len() {
+            1 => format!("port {}", names[0]),
+            _ => format!("ports {}", names.join(" and ")),
+        }
+    };
+    let carried = match carrying.iter().next() {
+        Some(_) if carrying.len() > 1 => {
+            format!("{} carry events on independent receivers", list(&carrying))
+        }
+        None => "no channel or SysEx events are routed".to_owned(),
+        Some(port) if declared.len() > 1 || !declared.contains(port) => {
+            format!(
+                "only port {port} carries channel and SysEx events, the receiver the projection uses"
+            )
+        }
+        Some(port) => format!("every channel and SysEx event uses port {port}"),
+    };
+    format!(
+        "MIDI Port event retained unchanged; the file declares {} and {carried}",
+        list(&declared)
+    )
 }
 
-fn gm_initialization(data: &[u8]) -> bool {
+/// A broadcast GM1 or GM2 System On message.
+pub fn gm_initialization(data: &[u8]) -> bool {
     matches!(data, [0x7e, 0x7f, 0x09, 0x01 | 0x03, 0xf7])
+}
+
+/// Channel messages the reference receiver interprets. Poly pressure and
+/// controllers without an implemented meaning return false.
+pub fn reference_channel_message(message: MidiMessage) -> bool {
+    match message {
+        MidiMessage::Aftertouch { .. } => false,
+        // CC20..31 have no assigned GM sound function. They still reach the
+        // SoundFont's controller modulators; custom game meanings (such as
+        // loop cues) are not inferred.
+        MidiMessage::Controller { controller, .. } => matches!(
+            controller.as_int(),
+            0 | 1 | 6 | 7 | 10 | 11 | 20..=31 | 38 | 64 | 66 | 91 | 93 | 98..=101 | 120 | 121 | 123..=127
+        ),
+        _ => true,
+    }
 }
 
 /// Messages the reference synthesizer cannot interpret must never disappear
@@ -51,56 +80,7 @@ pub fn preview_blockers(bytes: &[u8]) -> Vec<Diagnostic> {
             message: "invalid Standard MIDI File".into(),
         }];
     };
-    let mut diagnostics = routing_blockers(&smf);
-    // A fresh reference receiver already has its initial state. GM1/GM2
-    // initialization before any channel state needs no further sound action.
-    // Resets later in the song must not silently lose their state changes.
-    let first_channel = smf
-        .tracks
-        .iter()
-        .enumerate()
-        .filter_map(|(track, events)| {
-            let mut tick = 0u64;
-            events.iter().enumerate().find_map(|(index, event)| {
-                tick += u64::from(event.delta.as_int());
-                matches!(event.kind, TrackEventKind::Midi { .. }).then_some((tick, track, index))
-            })
-        })
-        .min();
-    for (track, events) in smf.tracks.iter().enumerate() {
-        let mut tick = 0u64;
-        for (index, event) in events.iter().enumerate() {
-            tick += u64::from(event.delta.as_int());
-            let unsupported = match event.kind {
-                TrackEventKind::SysEx(data)
-                    if gm_initialization(data)
-                        && first_channel.is_none_or(|first| (tick, track, index) < first) =>
-                {
-                    false
-                }
-                TrackEventKind::SysEx(_) | TrackEventKind::Escape(_) => true,
-                TrackEventKind::Midi {
-                    message: MidiMessage::Aftertouch { .. },
-                    ..
-                } => true,
-                // CC20..31 have no assigned GM sound function. They still
-                // reach the SoundFont's controller modulators; custom game
-                // meanings (such as loop cues) are not inferred.
-                TrackEventKind::Midi {
-                    message: MidiMessage::Controller { controller, .. },
-                    ..
-                } => !matches!(
-                    controller.as_int(),
-                    0 | 1 | 6 | 7 | 10 | 11 | 20..=31 | 38 | 64 | 66 | 91 | 93 | 98..=101 | 120 | 121 | 123..=127
-                ),
-                _ => false,
-            };
-            if unsupported {
-                diagnostics.push(Diagnostic { code: Code::UnsupportedMidi, location: format!("/tracks/{track}/events/{index}"), message: "this event is preserved in MIDI but has no verified reference-synth interpretation; preview is blocked".into() });
-            }
-        }
-    }
-    diagnostics
+    crate::render::project_preview_blockers(&smf)
 }
 
 pub fn analyze_smf(bytes: &[u8]) -> Value {
@@ -123,6 +103,7 @@ pub fn analyze_smf(bytes: &[u8]) -> Value {
     let result = read_smf_preserving(bytes);
     let diagnostics = result.as_ref().err().cloned().unwrap_or_default();
     let preview = preview_blockers(bytes);
+    let source = crate::render::midi_source_playback(bytes);
     let standalone = super::source::source_summary(bytes).is_ok();
     let embedded = if standalone {
         vec![]
@@ -139,14 +120,16 @@ pub fn analyze_smf(bytes: &[u8]) -> Value {
         "editing": {
             "unchanged_export": "exact original bytes, including encoding and event order",
             "supported": ["notes within existing voices", "program, volume, pan, expression, modulation, reverb, chorus and pitch-bend lanes", "tempo and meter", "project roles and sections"],
-            "retained_only": "unmodeled events, original track identities, markers, loop/end boundaries and RPN range events",
+            "retained_only": "unmodeled events, note events without an editable note (releases without a sounding note, notes never released, zero-length pairs), original track identities, markers, loop/end boundaries and RPN range events",
+            "note_pairing": "per track, port, channel and key; a release ends the earliest sounding onset (first in, first out). Stacked onsets stay separate notes bound to their own source events; edits that create new stacks or change the pairing are refused",
+            "shared_channels": "a control lane stays with the track holding its events; changes to it, and note changes on a key another voice sounds on the same port and channel, must be in scope for and are protected by every voice on that channel",
             "checks": "each edit is serialized and read back before commit; unsupported changes leave the revision unchanged",
             "edited_export": "unrelated events retain payload, absolute ticks, track and relative order; byte encoding may change",
             "retained": result.as_ref().ok().map(|r| &r.retained),
             "projection_normalizations": result.as_ref().ok().map(|r| &r.normalizations)
         },
-        "preview": {"available": result.is_ok() && preview.is_empty(), "blocker_count": preview.len(), "diagnostics": preview.iter().take(20).collect::<Vec<_>>(), "scope": "reference sound only; MIDI preservation does not establish original-device or target audio equivalence"},
+        "preview": {"available": source["available"], "project_available": result.is_ok() && preview.is_empty(), "source_problem": source.get("problem"), "timed_content": source.get("timed_content"), "source_diagnostics": source.get("diagnostics"), "receivers": source.get("receivers"), "sequence_count": source.get("sequence_count"), "sequences": source.get("sequences"), "route": "render_preview with source, destination and layout (and sequence for type 2); full-pass preflight at 44100 Hz", "blocker_count": preview.len(), "diagnostics": preview.iter().take(20).collect::<Vec<_>>(), "diagnostics_scope": "blocker_count and diagnostics concern project preview; source_diagnostics are what source-only render_preview returns", "scope": "reference sound only; MIDI preservation does not establish original-device or target audio equivalence"},
         "content": result.as_ref().ok().map(|r| json!({"timebase": r.timebase, "voices": r.composition.voices.len(), "notes": r.composition.notes.len()})),
-        "next_action": if result.is_ok() { "Load with load_midi and inspect original events with inspect_midi. Optionally import the loaded source for editing, then export. Use compare_midi to verify unchanged delivery; an intentional edit should produce differences." } else { "Use load_midi and inspect_midi to retain and inspect the original without a composition or mapping. These diagnostics concern the optional editable projection. Do not strip events to make the projection pass." },
+        "next_action": if result.is_ok() { "Load with load_midi and inspect original events with inspect_midi. Optionally import the loaded source for editing, then export. Use compare_midi to verify unchanged delivery; an intentional edit should produce differences." } else { "Use load_midi and inspect_midi to retain and inspect the original without a composition or mapping. These diagnostics concern the optional editable projection. Check preview for source-only render_preview playback. Do not strip events to make the projection pass." },
     })
 }

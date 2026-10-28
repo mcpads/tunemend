@@ -40,24 +40,47 @@ impl Service {
                 ));
             }
         }
-        let result = match apply_edit(info.timebase, &base.composition, &request) {
-            Ok(result) => result,
-            Err(diagnostics) => {
+        let stacked = match info.midi_source {
+            Some(_) => crate::composition::StackedNotes::SourcePaired,
+            None => crate::composition::StackedNotes::Reject,
+        };
+        let result =
+            match crate::edit::apply_edit_with(info.timebase, &base.composition, &request, stacked)
+            {
+                Ok(result) => result,
+                Err(diagnostics) => {
+                    return done(ToolResponse::blocked(
+                        "the edit was not applied; nothing changed",
+                        diagnostics,
+                    ));
+                }
+            };
+        if let Some(source) = &info.midi_source {
+            if let Err(diagnostics) =
+                crate::midi::check_source_bounds(source, &base.composition, &result, &request)
+            {
                 return done(ToolResponse::blocked(
                     "the edit was not applied; nothing changed",
                     diagnostics,
                 ));
             }
-        };
-        if let Some(source) = &info.midi_source
-            && let Err(diagnostics) =
+            if let Err(diagnostics) =
                 crate::midi::check_source_revision(source, info.timebase, &result)
-        {
-            return done(ToolResponse::blocked(
-                "the edit cannot be preserved in MIDI; nothing changed",
-                diagnostics,
-            ));
+            {
+                return done(ToolResponse::blocked(
+                    "the edit cannot be preserved in MIDI; nothing changed",
+                    diagnostics,
+                ));
+            }
         }
+        // Declared-end notes this revision's MIDI no longer leaves as in the source.
+        let declared = match &info.midi_source {
+            Some(source) if source.declared_ends.is_some() => {
+                crate::midi::declared_end_changes(source, &result, false)
+                    .map_err(|d| ToolResponse::blocked("invalid preserved MIDI", d))?
+            }
+            _ => vec![],
+        };
         self.check_changed_instruments(&base.composition.mix, &result.mix)?;
         let clips = self.check_changed_clips(info.timebase, &base.composition, &result)?;
         let store = self.store_ref()?;
@@ -93,6 +116,10 @@ impl Service {
         }
         if !clips.is_empty() {
             response.result["clips"] = json!(clips);
+        }
+        if !declared.is_empty() {
+            response.result["declared_end_writes"] = json!({"notes": declared,
+                "scope": "every declared-end note this revision changes relative to the source; its MIDI writes these releases"});
         }
         commit(response, move |writer| {
             writer.insert_revision(&project, &revision)?;

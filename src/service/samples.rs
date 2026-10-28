@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 const PLANS: &str = "sample_plan";
-const RAW_MAX_BYTES: usize = 262144;
+const RAW_MAX_BYTES: usize = crate::sample_codec::MAX_SAMPLES * 2;
 /// A RIFF/WAVE slice may hold up to 32 channels of 64-bit frames; frames stay
 /// within the codec's sample limit.
-const WAV_MAX_BYTES: usize = 8 << 20;
+const WAV_MAX_BYTES: usize = 64 << 20;
 type SampleFiles = Vec<(String, Vec<u8>)>;
 /// Codec report, its three output files, and the codec script when external.
 type CodecOutput = (Value, BTreeMap<String, Vec<u8>>, Option<Vec<u8>>);
@@ -28,8 +28,9 @@ pub struct PrepareSampleInput {
     pub offset: usize,
     pub length: Option<usize>,
     /// brr, u8, s8, s16le, s16be, psx_adpcm (PlayStation SPU ADPCM blocks),
-    /// vag (a complete VAG file in the slice), or wav (a complete RIFF/WAVE
-    /// file in the slice; see `wav`). Bank input requires brr.
+    /// vag (a complete VAG file in the slice), md_dac4 (Mega Drive DAC
+    /// values packed two four-bit codes per byte; needs md_dac), or wav (a
+    /// complete RIFF/WAVE file in the slice; see `wav`). Bank input requires brr.
     pub encoding: String,
     /// Explicit decoded sample rate, not inferred from the chip clock. For wav
     /// it must equal the header rate unless wav.reinterpret_rate is set.
@@ -42,7 +43,7 @@ pub struct PrepareSampleInput {
     /// Additional loop traversals to bake, carrying BRR decoder history.
     #[serde(default)]
     pub loop_repeats: u8,
-    /// brr, u8, s8, s16le, s16be, psx_adpcm or vag.
+    /// brr, u8, s8, s16le, s16be, psx_adpcm, vag or md_dac4 (needs md_dac).
     pub target: String,
     /// finite (default) bakes loop_repeats traversals into a one-shot; preserve
     /// keeps the loop in the target and checks loop re-entry.
@@ -63,6 +64,16 @@ pub struct PrepareSampleInput {
     /// encodings or targets.
     #[serde(default, skip_serializing_if = "no_psx_choice")]
     pub psx_adpcm: Option<PsxAdpcmInput>,
+    /// Level change in dB (-96..24, non-zero; 0 means none) applied to the
+    /// decoded PCM16 stream at the source rate, before any resampling and
+    /// target encoding.
+    /// Reported as the `gain` change with clipped samples and peaks.
+    #[serde(default, skip_serializing_if = "no_gain")]
+    pub gain_db: Option<f64>,
+    /// Declared md_dac4 layout; required when the encoding or target is
+    /// md_dac4 and refused otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md_dac: Option<MdDacInput>,
     /// Optional external codec script with the same JSON protocol; executed
     /// and snapshotted. Omit to use the built-in codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +143,15 @@ impl Default for PsxAdpcmInput {
         }
     }
 }
+/// Declared md_dac4 layout. The data carries no header, so the order in which
+/// a driver plays the two nibbles of a byte is stated, never inferred.
+#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MdDacInput {
+    /// high_first: bits 4-7 play before bits 0-3; low_first: the reverse.
+    /// Each nibble is the upper four bits of the 8-bit DAC value.
+    pub nibble_order: String,
+}
 fn silent_loop_block() -> String {
     "silent_loop_block".into()
 }
@@ -149,6 +169,9 @@ pub struct RootInput {
     /// Deviation from the note, -100..100 cents.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cents: f64,
+}
+fn no_gain(gain: &Option<f64>) -> bool {
+    gain.is_none_or(|g| g == 0.0)
 }
 fn no_wav_choice(wav: &Option<WavInput>) -> bool {
     wav.as_ref().is_none_or(|w| *w == WavInput::default())
@@ -291,6 +314,34 @@ impl Service {
                 reserved_shift_as_9: p.reserved_shift_as_9,
             }),
         };
+        let md_involved =
+            input.encoding == crate::md_dac::ENCODING || input.target == crate::md_dac::ENCODING;
+        let md_dac = match (&input.md_dac, md_involved) {
+            (None, true) => {
+                return Err(ToolResponse::refused(
+                    Code::TargetRefused,
+                    "/md_dac",
+                    "md_dac4 needs md_dac.nibble_order (high_first or low_first): the nibble a driver plays first is declared, never inferred",
+                ));
+            }
+            (Some(_), false) => {
+                return Err(ToolResponse::refused(
+                    Code::TargetRefused,
+                    "/md_dac",
+                    "md_dac applies only when encoding or target is md_dac4",
+                ));
+            }
+            (None, false) => None,
+            (Some(m), true) => Some(
+                crate::md_dac::NibbleOrder::parse(&m.nibble_order).ok_or_else(|| {
+                    ToolResponse::refused(
+                        Code::TargetRefused,
+                        "/md_dac/nibble_order",
+                        "md_dac.nibble_order is high_first or low_first",
+                    )
+                })?,
+            ),
+        };
         let policy = match input.loop_policy.as_str() {
             "finite" => LoopPolicy::Finite,
             "preserve" => LoopPolicy::Preserve,
@@ -313,6 +364,8 @@ impl Service {
                         cents: r.cents,
                     }),
                     psx,
+                    md_dac,
+                    gain_db: input.gain_db.filter(|g| *g != 0.0),
                 })
                 .map_err(refused)?;
                 (json!({"report": conversion.report}), conversion.files, None)
@@ -321,6 +374,9 @@ impl Service {
                 return Err(refused(
                     "PSX ADPCM and VAG use the built-in codec; omit codec",
                 ));
+            }
+            Some(_) if md_involved => {
+                return Err(refused("md_dac4 uses the built-in codec; omit codec"));
             }
             Some(_) if policy == LoopPolicy::Preserve => {
                 return Err(refused(
@@ -331,10 +387,11 @@ impl Service {
                 if input.encoding == crate::sample_codec::WAV
                     || wav.is_some()
                     || input.target_sample_rate.is_some()
+                    || !no_gain(&input.gain_db)
                     || input.root.is_some() =>
             {
                 return Err(refused(
-                    "WAV input, resampling and root pitch use the built-in codec; omit codec",
+                    "WAV input, resampling, gain and root pitch use the built-in codec; omit codec",
                 ));
             }
             Some(path) => self.external_codec(path, &input, &data, loop_offset)?,
@@ -353,6 +410,8 @@ impl Service {
             "caller-selected executable; conversion report is codec-reported, not independent hardware verification"
         } else if psx_involved {
             "built-in codec; documented SPU ADPCM decoding equation (and S-DSP integer BRR decoding where BRR is involved), not chip playback verification"
+        } else if md_involved {
+            "built-in codec; md_dac4 linear upper-four-bit DAC values in the declared nibble order (an observed reading, not a published format), not chip or driver playback verification"
         } else {
             "built-in codec; S-DSP integer BRR decoding, not chip playback verification"
         };
@@ -363,7 +422,9 @@ impl Service {
                 json!(input.wav.as_ref().filter(|w| **w != WavInput::default())),
             ),
             ("target_sample_rate", json!(input.target_sample_rate)),
+            ("gain_db", json!(input.gain_db.filter(|g| *g != 0.0))),
             ("root", json!(input.root)),
+            ("md_dac", json!(input.md_dac)),
             (
                 "psx_adpcm",
                 json!(
@@ -565,6 +626,21 @@ fn sample_summary(plan: &str, report: &Value, guide: &Value) -> Value {
         }
         summary["conversion"]["tuning"] = compact;
     }
+    for side in ["md_dac", "md_dac_target"] {
+        if conversion[side].is_object() {
+            summary["conversion"][side] = pick(
+                &conversion[side],
+                &[
+                    "layout",
+                    "bytes",
+                    "samples",
+                    "nibble_range",
+                    "clamped_samples",
+                    "padding_nibble",
+                ],
+            );
+        }
+    }
     if let Some(brr) = guide.get("brr_target") {
         summary["brr_target"] = pick(
             brr,
@@ -621,8 +697,8 @@ fn loop_diagnostics(conversion: &Value, target_wav: &[u8]) -> Option<Value> {
         crate::sample_loop::diagnostics(&stream, first_pass, loop_start, rate, root);
     let jump = diagnostics["phase_jump_periods"].as_f64();
     let encoding = conversion["encoding"].as_str().unwrap_or_default();
-    let chosen_in_samples =
-        encoding == crate::sample_codec::WAV || ["u8", "s8", "s16le", "s16be"].contains(&encoding);
+    let chosen_in_samples = encoding == crate::sample_codec::WAV
+        || ["u8", "s8", "s16le", "s16be", crate::md_dac::ENCODING].contains(&encoding);
     if let (Some(jump), Some(hz), true) = (
         jump,
         diagnostics["fundamental_hz"].as_f64(),
@@ -634,6 +710,7 @@ fn loop_diagnostics(conversion: &Value, target_wav: &[u8]) -> Option<Value> {
             Some(t) if crate::psx_adpcm::ENCODINGS.contains(&t) => {
                 crate::psx_adpcm::BLOCK_SAMPLES as u64
             }
+            Some(crate::md_dac::ENCODING) => 2,
             _ => 1,
         };
         let step = crate::sample_loop::source_step(block, source_rate, rate);
@@ -655,6 +732,8 @@ fn loop_diagnostics(conversion: &Value, target_wav: &[u8]) -> Option<Value> {
         );
         let field = if encoding == crate::sample_codec::WAV {
             "wav.loop_start_frame"
+        } else if encoding == crate::md_dac::ENCODING {
+            "loop_offset (bytes: an even source sample divided by 2)"
         } else {
             "loop_offset (bytes: the sample times its width)"
         };
@@ -786,7 +865,7 @@ fn report_guide(report: &Value, sample: Option<&[u8]>, target_wav: Option<&[u8]>
             json!(if conversion["encoding"] == crate::sample_codec::WAV {
                 "a raw-slice byte field; WAV loops are chosen with wav.loop_start_frame or wav.smpl_loop, so it is always null for WAV"
             } else {
-                "no loop offset was given or taken from a bank; PSX ADPCM and VAG loops come from their flags"
+                "no loop offset was given or taken from a bank; PSX ADPCM and VAG loops come from their flags; md_dac4 holds no loop"
             }),
         );
     }

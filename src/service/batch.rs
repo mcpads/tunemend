@@ -1,6 +1,6 @@
 //! Batch rendering: regions, stems and WAV formats in one call.
 
-use super::review::{layout_label, layout_problem, played_by, render_limits};
+use super::review::{add_loop_timing, layout_label, layout_problem, played_by, render_limits};
 use super::*;
 use crate::mix::part_voices;
 use crate::render::{StemCapture, wav_bytes_in};
@@ -390,6 +390,7 @@ impl Service {
         let mut listed = Vec::new();
         let mut spans = Vec::new();
         let mut artifacts = Vec::new();
+        let mut warnings = Vec::new();
         for (i, layout, region) in &layouts {
             let (mut audio, reports, instruments) = match self.revision_audio(
                 &info,
@@ -460,7 +461,15 @@ impl Service {
                     path: path.display().to_string(),
                     sha256: object.clone(),
                 });
-                let mut entry = json!({"render": render, "path": path});
+                let levels = render_levels(left, right, input.format);
+                if let Some(warning) = level_warning(
+                    &levels,
+                    input.format,
+                    &format!("/renders/{}/levels", listed.len()),
+                ) {
+                    warnings.push(warning);
+                }
+                let mut entry = json!({"render": render, "path": path, "levels": levels});
                 if silent(left, right, input.format) {
                     entry["silent"] = json!(true);
                 }
@@ -477,6 +486,10 @@ impl Service {
                     "tail_seconds": total_seconds - rational_seconds(content),
                     "tail_truncated": audio.tail_truncated, "max_tail_seconds": MAX_TAIL_SECONDS},
             });
+            if !reports.clips.is_empty() {
+                entry["clips"] = json!(reports.clips);
+            }
+            add_loop_timing(&mut entry["timing"], info.timebase, composition, layout);
             if tail_cut {
                 entry["timing"]["tail"] = json!("cut");
             }
@@ -503,19 +516,24 @@ impl Service {
             });
         }
         let ids: Vec<String> = records.iter().map(|r| r.render.id.clone()).collect();
-        let mut response = ToolResponse::ok(
-            format!(
-                "{} renders of {} ({}): {}",
-                records.len(),
-                revision.id,
-                match &input.stems {
-                    None => "mixdowns".to_owned(),
-                    Some(_) => format!("{} stems per span", parts.len()),
-                },
-                ids.join(", ")
-            ),
-            result,
+        let mut summary = format!(
+            "{} renders of {} ({}): {}",
+            records.len(),
+            revision.id,
+            match &input.stems {
+                None => "mixdowns".to_owned(),
+                Some(_) => format!("{} stems per span", parts.len()),
+            },
+            ids.join(", ")
         );
+        if !warnings.is_empty() {
+            summary.push_str(&format!(
+                "; {} renders exceed full scale (see warnings)",
+                warnings.len()
+            ));
+            result["warnings"] = json!(warnings);
+        }
+        let mut response = ToolResponse::ok(summary, result);
         response.artifacts = artifacts;
         let project = input.project;
         commit(response, move |writer| {
@@ -675,6 +693,42 @@ fn pcm_code(sample: f32, format: WavFormat) -> Option<i64> {
         WavFormat::Pcm24 => Some((f64::from(sample.clamp(-1.0, 1.0)) * 8_388_607.0).round() as i64),
         WavFormat::Float32 => None,
     }
+}
+
+/// The levels of one render before and after encoding: the f32 peak and the
+/// samples beyond full scale, kept apart from the samples the integer
+/// encoding clamped. Measured on the samples written; nothing is scaled.
+pub(super) fn render_levels(left: &[f32], right: &[f32], format: WavFormat) -> Value {
+    let (mut peak, mut over) = (0.0f32, 0usize);
+    for sample in left.iter().chain(right) {
+        peak = peak.max(sample.abs());
+        over += usize::from(sample.abs() > 1.0);
+    }
+    let clamped = if format == WavFormat::Float32 {
+        0
+    } else {
+        over
+    };
+    let peak_dbfs = (peak > 0.0).then(|| 20.0 * f64::from(peak).log10());
+    json!({"sample_peak": peak, "sample_peak_dbfs": peak_dbfs,
+        "samples_over_full_scale": over, "clamped_samples": clamped})
+}
+
+/// A warning for a render whose samples exceed full scale, located at its
+/// `levels`; `None` when none do. The audio is unchanged either way.
+pub(super) fn level_warning(levels: &Value, format: WavFormat, location: &str) -> Option<Value> {
+    let over = levels["samples_over_full_scale"]
+        .as_u64()
+        .filter(|&n| n > 0)?;
+    let peak = levels["sample_peak"].as_f64().unwrap_or(0.0);
+    let advice = "No level was changed. For headroom, lower a mixer or master volume or add a master limiter in a new revision (the MIDI is unaffected), then render again";
+    Some(if format == WavFormat::Float32 {
+        json!({"code": "samples_over_full_scale", "location": format!("{location}/samples_over_full_scale"),
+            "message": format!("{over} samples exceed full scale (peak {peak:.4}); the float file keeps them, but playback or integer conversion will clip them. {advice}")})
+    } else {
+        json!({"code": "integer_clipping", "location": format!("{location}/clamped_samples"),
+            "message": format!("{over} samples exceed full scale (peak {peak:.4}) and were clamped to the full-scale code by the integer encoding. {advice}, or render float32, which keeps the levels")})
+    })
 }
 
 /// Every sample of the file is zero in `format`.
